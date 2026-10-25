@@ -13,6 +13,8 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const useSupabase = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 if (process.env.NODE_ENV === 'production' && !useSupabase) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for production.');
 const sessions = new Map();
+const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY;
+const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 
 function readDb() {
   try {
@@ -79,15 +81,40 @@ function readBody(req) {
     req.on('error', reject);
   });
 }
-function tokenFrom(req) {
+function cookieTokenFrom(req) {
   const cookie = req.headers.cookie || '';
   const match = cookie.match(/(?:^|;\s*)session=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : '';
 }
+function signSession(payload) {
+  return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+}
+function createSessionToken(userId) {
+  if (!useSupabase) {
+    const token = crypto.randomBytes(32).toString('hex');
+    sessions.set(token, { userId });
+    return token;
+  }
+  const payload = Buffer.from(JSON.stringify({ userId, expiresAt: Date.now() + SESSION_MAX_AGE * 1000 })).toString('base64url');
+  return `${payload}.${signSession(payload)}`;
+}
+function sessionUserId(req) {
+  const token = cookieTokenFrom(req);
+  if (!useSupabase) return sessions.get(token)?.userId || null;
+  const [payload, signature, extra] = token.split('.');
+  if (!payload || !signature || extra) return null;
+  const expected = Buffer.from(signSession(payload));
+  const received = Buffer.from(signature);
+  if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) return null;
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return session.userId && session.expiresAt > Date.now() ? session.userId : null;
+  } catch { return null; }
+}
 async function currentUser(req) {
-  const session = sessions.get(tokenFrom(req));
-  if (!session) return null;
-  return findUserById(session.userId);
+  const userId = sessionUserId(req);
+  if (!userId) return null;
+  return findUserById(userId);
 }
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('hex')) => ({ salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') });
 function safeUser(user) { return { id: user.id, username: user.username }; }
@@ -153,8 +180,8 @@ async function route(req, res) {
     const creds = hashPassword(password);
     const user = { id: crypto.randomUUID(), username, ...creds };
     await createUser(user);
-    const token = crypto.randomBytes(32).toString('hex'); sessions.set(token, { userId: user.id });
-    return send(res, 201, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token) });
+    const token = createSessionToken(user.id);
+    return send(res, 201, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token, `; Max-Age=${SESSION_MAX_AGE}`) });
   }
   if (method === 'POST' && url.pathname === '/api/login') {
     const body = await readBody(req), username = String(body.username || '').trim().toLowerCase(), password = String(body.password || '');
@@ -162,14 +189,14 @@ async function route(req, res) {
     if (!user) return send(res, 401, { error: 'Incorrect username or password.' });
     const check = crypto.scryptSync(password, user.salt, 64);
     if (!crypto.timingSafeEqual(check, Buffer.from(user.hash, 'hex'))) return send(res, 401, { error: 'Incorrect username or password.' });
-    const token = crypto.randomBytes(32).toString('hex'); sessions.set(token, { userId: user.id });
-    return send(res, 200, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token) });
+    const token = createSessionToken(user.id);
+    return send(res, 200, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token, `; Max-Age=${SESSION_MAX_AGE}`) });
   }
   if (method === 'POST' && url.pathname === '/api/logout') {
-    sessions.delete(tokenFrom(req)); return send(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', '; Max-Age=0') });
+    sessions.delete(cookieTokenFrom(req)); return send(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', '; Max-Age=0') });
   }
   if (method === 'GET' && url.pathname === '/api/me') {
-    const user = currentUser(req); return user ? send(res, 200, { user: safeUser(user) }) : send(res, 401, { error: 'Please sign in.' });
+    const user = await currentUser(req); return user ? send(res, 200, { user: safeUser(user) }) : send(res, 401, { error: 'Please sign in.' });
   }
     const user = await currentUser(req);
   if (url.pathname.startsWith('/api/')) {
