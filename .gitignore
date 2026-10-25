@@ -1,0 +1,8 @@
+# Local investment data and OS files
+/data/db.json
+/data/db.json.tmp
+.DS_Store
+
+# Dependencies and logs
+/node_modules/
+npm-debug.log*
