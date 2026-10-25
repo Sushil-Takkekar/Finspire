@@ -164,3 +164,112 @@
 .main-stat-grid .insurance-stat {
   border-color: #c8d9ee;
 }
+
+/* Dashboard privacy toggle and value masking. */
+.privacy-toggle {
+  width: 40px;
+  height: 40px;
+  border: 1px solid #e1e7d9;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #65715f;
+  background: #fff;
+  padding: 0;
+}
+.privacy-toggle:hover { background: #f6f8f2; color: #40533a; }
+.privacy-toggle svg { width: 19px; height: 19px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.privacy-toggle.is-visible .eye-slash { display: none; }
+#dashboard .dashboard-number { position: relative; }
+#dashboard.values-hidden .dashboard-number {
+  color: transparent !important;
+  -webkit-text-fill-color: transparent;
+  text-shadow: none !important;
+  user-select: none;
+}
+#dashboard.values-hidden .dashboard-number::after {
+  content: "******";
+  position: absolute;
+  inset: 0 auto auto 0;
+  color: var(--ink);
+  -webkit-text-fill-color: var(--ink);
+  letter-spacing: .12em;
+}
+#dashboard.values-hidden .bar-amount:empty::after { content: none; }
+
+.debt-total-card {
+  max-width: 380px;
+  min-height: 108px;
+  margin: 0 0 13px;
+}
+
+.debt-total-card {
+  width: 100%;
+  max-width: none;
+}
+
+.debt-total-card {
+  min-height: 94px;
+  padding: 16px 19px;
+}
+.debt-total-card .stat-value {
+  font: 700 24px var(--display);
+  letter-spacing: -.7px;
+  line-height: normal;
+  margin: 5px 0 0;
+}
+.debt-total-card .stat-foot {
+  font-size: 10px;
+  margin-top: 5px;
+}
+
+.debt-total-card {
+  background: #fff1ee;
+  border-color: #e9c9c1;
+}
+.debt-total-card .debt-summary-icon {
+  background: #f8dcd5;
+  color: #b65343;
+}
+
+/* Use the same page-heading button sizing for direct and grouped actions. */
+.page-heading > .heading-actions > .btn {
+  height: 40px;
+  padding: 0 15px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+@media (max-width: 720px) {
+  .page-heading > .heading-actions > .btn {
+    height: 39px;
+    padding: 0 10px;
+  }
+}
+
+.page-heading > .heading-actions {
+  margin-left: auto;
+  align-self: flex-end;
+}
+
+#refresh-navs .refresh-label,
+#refresh-loans .refresh-label {
+  margin-left: 6px;
+}
+
+/* Spark F identity selected for Finspire. */
+.brand-mark {
+  position: relative;
+  overflow: hidden;
+  background: var(--forest);
+  color: var(--lime);
+}
+.brand-mark::after {
+  content: '✦';
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  color: var(--lime);
+  font: 700 7px/1 var(--display);
+}

@@ -20,26 +20,59 @@ async function api(path, options = {}) {
   return data;
 }
 function showToast(message) { const toast = $('#toast'); toast.textContent = message; toast.classList.add('show'); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => toast.classList.remove('show'), 2800); }
+let dashboardValuesVisible = false;
+function setDashboardValuesVisible(visible) {
+  dashboardValuesVisible = visible;
+  $('#dashboard').classList.toggle('values-hidden', !visible);
+  const button = $('#toggle-dashboard-values');
+  button.classList.toggle('is-visible', visible);
+  button.setAttribute('aria-pressed', String(visible));
+  const label = visible ? 'Hide investment values' : 'Show investment values';
+  button.setAttribute('aria-label', label); button.title = label;
+}
+$('#toggle-dashboard-values').addEventListener('click', () => setDashboardValuesVisible(!dashboardValuesVisible));
 function setAuth(mode) { authMode = mode; $('#auth-title').textContent = mode === 'login' ? 'Welcome back.' : 'Start building wealth.'; $('#auth-subtitle').textContent = mode === 'login' ? 'Sign in to your private investment dashboard.' : 'Create a local account for your portfolio.'; $('#auth-submit').innerHTML = mode === 'login' ? 'Sign in <span>→</span>' : 'Create account <span>→</span>'; $('#auth-toggle').innerHTML = mode === 'login' ? 'New here? <button type="button">Create an account</button>' : 'Already have an account? <button type="button">Sign in</button>'; $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; $('#auth-error').textContent = ''; }
-function openApp(nextUser) { user = nextUser; $('#auth-view').hidden = true; $('#app').hidden = false; $('#profile-name').textContent = user.username; $('#avatar').textContent = user.username.slice(0, 1).toUpperCase(); $('#today').textContent = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date()); $('#greeting-date').textContent = new Intl.DateTimeFormat('en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase(); refreshHoldings(); refreshInsurance(); refreshLoans(); }
+function openApp(nextUser) { user = nextUser; setDashboardValuesVisible(false); $('#auth-view').hidden = true; $('#app').hidden = false; $('#profile-name').textContent = user.username; $('#avatar').textContent = user.username.slice(0, 1).toUpperCase(); $('#today').textContent = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date()); $('#greeting-date').textContent = new Intl.DateTimeFormat('en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase(); refreshHoldings(); refreshInsurance(); refreshLoans(); }
 function openAuth() { $('#app').hidden = true; $('#auth-view').hidden = false; }
 $('#auth-toggle').addEventListener('click', e => { if (e.target.tagName === 'BUTTON') setAuth(authMode === 'login' ? 'register' : 'login'); });
 $('#auth-form').addEventListener('submit', async e => { e.preventDefault(); $('#auth-error').textContent = ''; const button = $('#auth-submit'); button.disabled = true; try { const result = await api(`/api/${authMode}`, { method: 'POST', body: JSON.stringify({ username: $('#auth-username').value, password: $('#auth-password').value }) }); openApp(result.user); } catch (error) { $('#auth-error').textContent = error.message; } finally { button.disabled = false; } });
 $('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST', body: '{}' }); } finally { user = null; holdings = []; insurancePolicies = []; loans = []; openAuth(); } });
-$('#refresh-navs').addEventListener('click', async () => {
-  const button = $('#refresh-navs');
-  if (!holdings.some(item => item.type === 'mf')) { showToast('There are no mutual fund holdings to refresh.'); return; }
-  button.disabled = true; button.innerHTML = '↻ <span class="refresh-label">Refreshing…</span>';
+function hasMutualFunds() { return holdings.some(item => item.type === 'mf'); }
+function portfolioRefreshAvailable() { return hasMutualFunds() || loans.length > 0; }
+let portfolioRefreshRunning = false;
+function updatePortfolioRefreshButtons() {
+  const dashboardButton = $('#refresh-navs'), investmentsButton = $('#refresh-navs-investments');
+  if (dashboardButton) dashboardButton.disabled = portfolioRefreshRunning || !portfolioRefreshAvailable();
+  if (investmentsButton) investmentsButton.disabled = portfolioRefreshRunning || !hasMutualFunds();
+}
+async function refreshPortfolioData(button, includeLoans) {
+  if (portfolioRefreshRunning) return;
+  const hasFunds = hasMutualFunds(), hasLoans = includeLoans && loans.length > 0;
+  if (!hasFunds && !hasLoans) { showToast('There are no mutual funds or loans to refresh.'); return; }
+  portfolioRefreshRunning = true; updatePortfolioRefreshButtons();
+  button.innerHTML = '↻ <span class="refresh-label">Refreshing…</span>';
+  const statuses = [];
   try {
-    const result = await api('/api/refresh-navs', { method: 'POST', body: '{}' });
-    holdings = result.holdings; render();
-    if (result.failed.length) {
-      const firstFailure = result.failed[0];
-      showToast(result.updated ? `Updated ${result.updated} fund${result.updated === 1 ? '' : 's'}, added ${result.sipAdded} SIP installment${result.sipAdded === 1 ? '' : 's'}; ${result.failed.length} failed (${firstFailure.name}).` : `Could not update NAVs (${firstFailure.name}).`);
-    } else showToast(`Updated NAV for ${result.updated} mutual fund${result.updated === 1 ? '' : 's'}${result.sipAdded ? `; added ${result.sipAdded} SIP installment${result.sipAdded === 1 ? '' : 's'}` : ''}.`);
-  } catch (error) { showToast(error.message); }
-  finally { button.innerHTML = '↻ <span class="refresh-label">Refresh</span>'; button.disabled = !holdings.some(item => item.type === 'mf'); }
-});
+    if (hasFunds) {
+      try {
+        const result = await api('/api/refresh-navs', { method: 'POST', body: '{}' });
+        holdings = result.holdings; render();
+        const failed = result.failed || [];
+        statuses.push(failed.length ? `MF NAVs updated: ${result.updated}; ${result.sipAdded} SIPs added; ${failed.length} failed (${failed[0].name})` : `MF NAVs updated: ${result.updated}${result.sipAdded ? `; ${result.sipAdded} SIPs added` : ''}`);
+      } catch (error) { statuses.push(`MF refresh failed: ${error.message}`); }
+    }
+    if (hasLoans) {
+      try {
+        const result = await api('/api/refresh-loans', { method: 'POST', body: '{}' });
+        loans = result.loans; renderLoans();
+        statuses.push(`Loan balances updated through ${dateLabel(result.asOf)}.`);
+      } catch (error) { statuses.push(`Loan refresh failed: ${error.message}`); }
+    }
+    showToast(statuses.join(' · '));
+  } finally { button.innerHTML = '↻ <span class="refresh-label">Refresh</span>'; portfolioRefreshRunning = false; updatePortfolioRefreshButtons(); }
+}
+$('#refresh-navs').addEventListener('click', event => refreshPortfolioData(event.currentTarget, true));
+$('#refresh-navs-investments').addEventListener('click', event => refreshPortfolioData(event.currentTarget, false));
 
 async function refreshHoldings() { try { holdings = (await api('/api/holdings')).holdings; render(); } catch (error) { if (error.message === 'Please sign in.') openAuth(); else showToast(error.message); } }
 function estimatedValue(item) {
@@ -79,7 +112,7 @@ function render() {
   const visible = holdings.filter(item => filterType === 'all' || item.type === filterType);
   const totalValue = holdings.reduce((sum, item) => sum + estimatedValue(item), 0);
   $('#net-worth').textContent = money(totalValue); $('#donut-total').textContent = money(totalValue); $('#networth-holdings').textContent = `${holdings.length} investment${holdings.length === 1 ? '' : 's'}`; $('#holding-count').textContent = holdings.length; $('#nav-count').textContent = holdings.length;
-  const assetTotals = Object.keys(ASSETS).map((type, index) => { const group = holdings.filter(item => item.type === type); const value = group.reduce((sum, item) => sum + estimatedValue(item), 0); $(`#value-${type}`).textContent = money(value); $(`#count-${type}`).textContent = `${group.length} ${type === 'ppf' ? 'account' : type === 'stock' || type === 'mf' ? 'holding' : 'deposit'}${group.length === 1 ? '' : 's'}`; return { type, value, index }; }); const mainGrid = $('.main-stat-grid'); mainGrid.append($('.networth-card'), $('#loans-stat'), $('#insurance-stat')); const investmentGrid = $('.investment-stat-grid'); assetTotals.sort((a, b) => b.value - a.value || a.index - b.index).forEach(asset => { investmentGrid.append($(`[data-asset-type="${asset.type}"]`)); }); $('#refresh-navs').disabled = !holdings.some(item => item.type === 'mf');
+  const assetTotals = Object.keys(ASSETS).map((type, index) => { const group = holdings.filter(item => item.type === type); const value = group.reduce((sum, item) => sum + estimatedValue(item), 0); $(`#value-${type}`).textContent = money(value); $(`#count-${type}`).textContent = `${group.length} ${type === 'ppf' ? 'account' : type === 'stock' || type === 'mf' ? 'holding' : 'deposit'}${group.length === 1 ? '' : 's'}`; return { type, value, index }; }); const mainGrid = $('.main-stat-grid'); mainGrid.append($('.networth-card'), $('#loans-stat'), $('#insurance-stat')); const investmentGrid = $('.investment-stat-grid'); assetTotals.sort((a, b) => b.value - a.value || a.index - b.index).forEach(asset => { investmentGrid.append($(`[data-asset-type="${asset.type}"]`)); }); updatePortfolioRefreshButtons();
   $('#empty-state').classList.toggle('show', holdings.length === 0); $('#holdings-body').innerHTML = '';
   Object.keys(ASSETS).forEach(type => {
     const group = visible.filter(item => item.type === type);
@@ -104,13 +137,13 @@ function renderAllocation(total, types) {
   const segments = $('#donut-segments'), legend = $('#allocation-legend'); segments.innerHTML = ''; legend.innerHTML = '';
   if (!total) { legend.innerHTML = '<div class="empty-chart-label">Add investments<br>to see your allocation</div>'; return; }
   let offset = 0; const circumference = 2 * Math.PI * 70;
-  types.forEach(type => { const value = holdings.filter(item => item.type === type).reduce((sum, item) => sum + estimatedValue(item), 0), length = value / total * circumference, circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); circle.setAttribute('cx', 90); circle.setAttribute('cy', 90); circle.setAttribute('r', 70); circle.setAttribute('fill', 'none'); circle.setAttribute('stroke', ASSETS[type].color); circle.setAttribute('stroke-width', 21); circle.setAttribute('stroke-dasharray', `${Math.max(0, length - 2)} ${circumference - length + 2}`); circle.setAttribute('stroke-dashoffset', -offset); circle.setAttribute('stroke-linecap', 'butt'); segments.append(circle); offset += length; const item = document.createElement('div'); item.className = 'legend-item'; item.innerHTML = `<i style="background:${ASSETS[type].color}"></i><span>${ASSETS[type].label}</span><b>${(value / total * 100).toFixed(0)}%</b>`; legend.append(item); });
+  types.forEach(type => { const value = holdings.filter(item => item.type === type).reduce((sum, item) => sum + estimatedValue(item), 0), length = value / total * circumference, circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); circle.setAttribute('cx', 90); circle.setAttribute('cy', 90); circle.setAttribute('r', 70); circle.setAttribute('fill', 'none'); circle.setAttribute('stroke', ASSETS[type].color); circle.setAttribute('stroke-width', 21); circle.setAttribute('stroke-dasharray', `${Math.max(0, length - 2)} ${circumference - length + 2}`); circle.setAttribute('stroke-dashoffset', -offset); circle.setAttribute('stroke-linecap', 'butt'); segments.append(circle); offset += length; const item = document.createElement('div'); item.className = 'legend-item'; item.innerHTML = `<i style="background:${ASSETS[type].color}"></i><span>${ASSETS[type].label}</span><b class="dashboard-number">${(value / total * 100).toFixed(0)}%</b>`; legend.append(item); });
 }
 function renderBars() {
   const host = $('#chart-bars'), groups = [{ label: 'Stocks', types: ['stock'] }, { label: 'Mutual funds', types: ['mf'] }, { label: 'PPF', types: ['ppf'] }, { label: 'Fixed income', types: ['fd', 'rd'] }]; host.innerHTML = '';
   if (!holdings.length) { host.innerHTML = '<div class="chart-empty">Your portfolio will appear here</div>'; return; }
   const max = Math.max(1, ...groups.map(group => holdings.filter(item => group.types.includes(item.type)).reduce((sum, item) => sum + estimatedValue(item), 0)));
-  groups.forEach(group => { const items = holdings.filter(item => group.types.includes(item.type)), sum = items.reduce((a, item) => a + estimatedValue(item), 0), div = document.createElement('div'); div.className = 'bar-group'; const stack = document.createElement('div'); stack.className = 'bar-stack'; stack.style.height = `${sum / max * 82}%`; items.forEach(item => { const fill = document.createElement('i'); fill.className = 'bar-fill'; fill.style.height = `${sum ? estimatedValue(item) / sum * 100 : 0}%`; fill.style.background = ASSETS[item.type].color; stack.append(fill); }); div.innerHTML = `<span class="bar-amount">${sum ? money(sum) : ''}</span>`; div.append(stack); host.append(div); });
+  groups.forEach(group => { const items = holdings.filter(item => group.types.includes(item.type)), sum = items.reduce((a, item) => a + estimatedValue(item), 0), div = document.createElement('div'); div.className = 'bar-group'; const stack = document.createElement('div'); stack.className = 'bar-stack'; stack.style.height = `${sum / max * 82}%`; items.forEach(item => { const fill = document.createElement('i'); fill.className = 'bar-fill'; fill.style.height = `${sum ? estimatedValue(item) / sum * 100 : 0}%`; fill.style.background = ASSETS[item.type].color; stack.append(fill); }); div.innerHTML = `<span class="bar-amount dashboard-number">${sum ? money(sum) : ''}</span>`; div.append(stack); host.append(div); });
 }
 
 const fields = {
@@ -131,7 +164,7 @@ function openModal(item = null) { editingId = item?.id || null; $('#modal-backdr
 }
 const first = $('#f-name') || $('#f-code'); first?.focus(); }
 function closeModal() { $('#modal-backdrop').hidden = true; $('#investment-form').reset(); editingId = null; $('#asset-tabs').classList.remove('editing'); }
-['#add-top', '#add-inline', '#empty-add'].forEach(selector => $(selector).addEventListener('click', () => openModal()));
+['#add-inline', '#empty-add'].forEach(selector => $(selector).addEventListener('click', () => openModal()));
 $('#add-investment-page').addEventListener('click', () => openModal());
 $('#modal-close').addEventListener('click', closeModal); $('#cancel-add').addEventListener('click', closeModal); $('#modal-backdrop').addEventListener('click', e => { if (e.target === $('#modal-backdrop')) closeModal(); }); document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); closeInsuranceModal(); closeLoanModal(); } });
 $('#asset-tabs').addEventListener('click', e => { const button = e.target.closest('[data-type]'); if (button) setType(button.dataset.type); });
@@ -301,7 +334,8 @@ function todayIsoFromDate(date) { return `${date.getFullYear()}-${String(date.ge
 function renderLoans() {
   $('#debt-count').textContent = loans.length; $('#loan-count').textContent = loans.length;
   const activeLoans = loans.filter(loan => loan.status !== 'Closed'), outstandingTotal = activeLoans.reduce((sum, loan) => sum + number(loan.outstandingPrincipal), 0);
-  $('#value-loans').textContent = money(outstandingTotal); $('#count-loans').textContent = `${activeLoans.length} active ${activeLoans.length === 1 ? 'loan' : 'loans'}`;
+  $('#value-loans').textContent = money(outstandingTotal); $('#debt-outstanding-total').textContent = money(outstandingTotal); $('#count-loans').textContent = `${activeLoans.length} active ${activeLoans.length === 1 ? 'loan' : 'loans'}`;
+  updatePortfolioRefreshButtons();
   $('#debt-empty').classList.toggle('show', loans.length === 0);
   $('#loans-body').innerHTML = loans.map(loan => {
     const estimate = loanEstimate(loan), count = estimate.unpayable ? 'EMI too low' : `${estimate.count} ${estimate.count === 1 ? 'EMI' : 'EMIs'}`, closure = estimate.closed ? 'Closed' : estimate.unpayable ? '—' : dateLabel(estimate.closure ? todayIsoFromDate(estimate.closure) : '');
