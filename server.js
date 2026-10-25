@@ -28,14 +28,15 @@ function writeDb(db) {
   fs.renameSync(tmp, DB_FILE);
 }
 async function supabaseRequest(table, query = '', options = {}) {
+  const headers = {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    'Content-Type': 'application/json',
+    ...(SUPABASE_SERVICE_ROLE_KEY.startsWith('eyJ') ? { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } : {}),
+    ...(options.method === 'POST' || options.method === 'PATCH' ? { Prefer: 'return=representation' } : {})
+  };
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, {
     method: options.method || 'GET',
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-      ...(options.method === 'POST' || options.method === 'PATCH' ? { Prefer: 'return=representation' } : {})
-    },
+    headers,
     ...(options.body ? { body: JSON.stringify(options.body) } : {}),
     signal: AbortSignal.timeout(10000)
   });
