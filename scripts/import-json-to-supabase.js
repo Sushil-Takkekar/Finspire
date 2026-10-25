@@ -9,14 +9,15 @@ if (!baseUrl || !serviceKey) throw new Error('Set SUPABASE_URL and SUPABASE_SERV
 if (!fs.existsSync(file)) throw new Error('Local data/db.json was not found.');
 
 async function request(table, body, conflict = 'id') {
+  const headers = {
+    apikey: serviceKey,
+    'Content-Type': 'application/json',
+    ...(serviceKey.startsWith('eyJ') ? { Authorization: `Bearer ${serviceKey}` } : {}),
+    Prefer: 'resolution=merge-duplicates,return=minimal'
+  };
   const response = await fetch(`${baseUrl}/rest/v1/${table}?on_conflict=${conflict}`, {
     method: 'POST',
-    headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates,return=minimal'
-    },
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15000)
   });
