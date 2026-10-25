@@ -31,11 +31,11 @@ function setDashboardValuesVisible(visible) {
   button.setAttribute('aria-label', label); button.title = label;
 }
 $('#toggle-dashboard-values').addEventListener('click', () => setDashboardValuesVisible(!dashboardValuesVisible));
-function setAuth(mode) { authMode = mode; $('#auth-title').textContent = mode === 'login' ? 'Welcome back.' : 'Start building wealth.'; $('#auth-subtitle').textContent = mode === 'login' ? 'Sign in to your private investment dashboard.' : 'Create a local account for your portfolio.'; $('#auth-submit').innerHTML = mode === 'login' ? 'Sign in <span>→</span>' : 'Create account <span>→</span>'; $('#auth-toggle').innerHTML = mode === 'login' ? 'New here? <button type="button">Create an account</button>' : 'Already have an account? <button type="button">Sign in</button>'; $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; $('#auth-error').textContent = ''; }
+function setAuth(mode) { authMode = mode; $('#auth-title').textContent = mode === 'login' ? 'Welcome back.' : 'Start building wealth.'; $('#auth-subtitle').textContent = mode === 'login' ? 'Sign in to your private investment dashboard.' : 'Create a local account for your portfolio.'; $('#auth-submit').innerHTML = mode === 'login' ? 'Sign in <span>→</span>' : 'Create account <span>→</span>'; $('#auth-toggle').innerHTML = mode === 'login' ? 'New here? <button type="button">Create an account</button>' : 'Already have an account? <button type="button">Sign in</button>'; $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; const confirmLabel = $('#confirm-password-label'), confirmPassword = $('#auth-confirm-password'); confirmLabel.hidden = mode === 'login'; confirmPassword.required = mode === 'register'; confirmPassword.value = ''; $('#auth-error').textContent = ''; }
 function openApp(nextUser) { user = nextUser; setDashboardValuesVisible(false); $('#auth-view').hidden = true; $('#app').hidden = false; $('#profile-name').textContent = user.username; $('#avatar').textContent = user.username.slice(0, 1).toUpperCase(); $('#today').textContent = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date()); $('#greeting-date').textContent = new Intl.DateTimeFormat('en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase(); refreshHoldings(); refreshInsurance(); refreshLoans(); }
 function openAuth() { $('#app').hidden = true; $('#auth-view').hidden = false; }
 $('#auth-toggle').addEventListener('click', e => { if (e.target.tagName === 'BUTTON') setAuth(authMode === 'login' ? 'register' : 'login'); });
-$('#auth-form').addEventListener('submit', async e => { e.preventDefault(); $('#auth-error').textContent = ''; const button = $('#auth-submit'); button.disabled = true; try { const result = await api(`/api/${authMode}`, { method: 'POST', body: JSON.stringify({ username: $('#auth-username').value, password: $('#auth-password').value }) }); openApp(result.user); } catch (error) { $('#auth-error').textContent = error.message; } finally { button.disabled = false; } });
+$('#auth-form').addEventListener('submit', async e => { e.preventDefault(); $('#auth-error').textContent = ''; if (authMode === 'register' && $('#auth-password').value !== $('#auth-confirm-password').value) { $('#auth-error').textContent = 'Passwords do not match.'; $('#auth-confirm-password').focus(); return; } const button = $('#auth-submit'); button.disabled = true; try { const result = await api(`/api/${authMode}`, { method: 'POST', body: JSON.stringify({ username: $('#auth-username').value, password: $('#auth-password').value }) }); openApp(result.user); } catch (error) { $('#auth-error').textContent = error.message; } finally { button.disabled = false; } });
 $('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST', body: '{}' }); } finally { user = null; holdings = []; insurancePolicies = []; loans = []; openAuth(); } });
 function hasMutualFunds() { return holdings.some(item => item.type === 'mf'); }
 function portfolioRefreshAvailable() { return hasMutualFunds() || loans.length > 0; }
@@ -250,6 +250,18 @@ function dateLabel(value) {
   const [year, month, day] = value.split('-').map(Number);
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(year, month - 1, day));
 }
+function renderPolicyMaturity(policy) {
+  const utcDay = value => { const [year, month, day] = String(value || '').split('-').map(Number); return year && month && day ? Date.UTC(year, month - 1, day) : NaN; };
+  const dayMs = 86400000, start = utcDay(policy.fromDate), end = utcDay(policy.toDate), today = utcDay(todayIso());
+  const totalDays = Math.max(1, Math.round((end - start) / dayMs) + 1);
+  const expired = !Number.isFinite(end) || today > end;
+  const daysLeft = expired ? 0 : Math.max(1, Math.ceil((end - today) / dayMs) + 1);
+  const remainingPercent = expired ? 0 : Math.min(100, daysLeft / totalDays * 100);
+  const radius = 18, circumference = 2 * Math.PI * radius, offset = circumference * (1 - remainingPercent / 100);
+  const centerLabel = daysLeft > 999 ? `${Math.round(daysLeft / 365)}y` : `${daysLeft}d`;
+  const label = expired ? 'Policy expired' : `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining until maturity`;
+  return `<div class="insurance-maturity"><span class="maturity-ring${expired ? ' expired' : ''}" role="img" aria-label="${label}; ${Math.round(remainingPercent)}% of policy term remaining"><svg viewBox="0 0 44 44" aria-hidden="true"><circle class="maturity-track" cx="22" cy="22" r="${radius}"/><circle class="maturity-progress" cx="22" cy="22" r="${radius}" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}" transform="rotate(-90 22 22)"/></svg><span>${centerLabel}</span></span><span class="maturity-copy"><strong>${expired ? 'Expired' : `${daysLeft} day${daysLeft === 1 ? '' : 's'}`}</strong><small>${expired ? 'Policy ended' : 'remaining'}</small></span></div>`;
+}
 function renderInsurance() {
   const yearlyPremium = insurancePolicies.reduce((sum, policy) => sum + number(policy.premium), 0);
   $('#annual-premium-total').textContent = money(yearlyPremium);
@@ -258,7 +270,7 @@ function renderInsurance() {
   $('#count-insurance').textContent = `${insurancePolicies.length} ${insurancePolicies.length === 1 ? 'policy' : 'policies'}`;
   $('#policy-count').textContent = insurancePolicies.length;
   $('#insurance-empty').classList.toggle('show', insurancePolicies.length === 0);
-  $('#insurance-body').innerHTML = insurancePolicies.map(policy => `<tr><td><strong>${escapeHtml(policy.insuredPerson)}</strong></td><td><span class="type-pill">${escapeHtml(policy.type)}</span></td><td>${escapeHtml(policy.company)}</td><td>${escapeHtml(policy.policyNumber)}</td><td>${money(policy.sumInsured)}</td><td>${dateLabel(policy.fromDate)} – ${dateLabel(policy.toDate)}</td><td>${money(policy.premium)}</td><td><div class="row-actions"><button class="row-edit" data-policy-edit="${escapeHtml(policy.id)}" aria-label="Edit policy for ${escapeHtml(policy.insuredPerson)}" title="Edit">✎</button><button class="row-delete" data-policy-delete="${escapeHtml(policy.id)}" aria-label="Remove policy for ${escapeHtml(policy.insuredPerson)}" title="Remove">×</button></div></td></tr>`).join('');
+  $('#insurance-body').innerHTML = insurancePolicies.map(policy => `<tr><td><strong>${escapeHtml(policy.insuredPerson)}</strong></td><td><span class="type-pill">${escapeHtml(policy.type)}</span></td><td>${escapeHtml(policy.company)}</td><td>${escapeHtml(policy.policyNumber)}</td><td>${money(policy.sumInsured)}</td><td>${dateLabel(policy.fromDate)} – ${dateLabel(policy.toDate)}</td><td>${renderPolicyMaturity(policy)}</td><td>${money(policy.premium)}</td><td><div class="row-actions"><button class="row-edit" data-policy-edit="${escapeHtml(policy.id)}" aria-label="Edit policy for ${escapeHtml(policy.insuredPerson)}" title="Edit">✎</button><button class="row-delete" data-policy-delete="${escapeHtml(policy.id)}" aria-label="Remove policy for ${escapeHtml(policy.insuredPerson)}" title="Remove">×</button></div></td></tr>`).join('');
 }
 function openInsuranceModal(policy = null) {
   editingPolicyId = policy?.id || null;

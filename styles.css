@@ -273,3 +273,21 @@
   color: var(--lime);
   font: 700 7px/1 var(--display);
 }
+
+.insurance-table { min-width: 1080px; }
+.insurance-maturity { display: flex; align-items: center; gap: 9px; min-width: 128px; }
+.maturity-ring { width: 44px; height: 44px; position: relative; display: inline-block; flex: none; }
+.maturity-ring svg { display: block; width: 100%; height: 100%; }
+.maturity-track,
+.maturity-progress { fill: none; stroke-width: 4; }
+.maturity-track { stroke: #edf0e8; }
+.maturity-progress { stroke: #a8d448; stroke-linecap: round; transition: stroke-dashoffset .25s ease; }
+.maturity-ring.expired .maturity-progress { stroke: #bd6657; }
+.maturity-ring > span { position: absolute; inset: 0; display: grid; place-items: center; font: 500 9px var(--mono); color: #5b6654; }
+.maturity-copy { display: grid; gap: 2px; }
+.maturity-copy strong { font-size: 10px; font-weight: 600; color: #465141; }
+.maturity-copy small { font-size: 9px; color: #92998e; }
+
+.auth-card form #confirm-password-label[hidden] {
+  display: none;
+}
