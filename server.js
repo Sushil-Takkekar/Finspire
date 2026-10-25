@@ -7,6 +7,11 @@ const ROOT = __dirname;
 const DB_DIR = path.join(ROOT, 'data');
 const DB_FILE = path.join(DB_DIR, 'db.json');
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '0.0.0.0';
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const useSupabase = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+if (process.env.NODE_ENV === 'production' && !useSupabase) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for production.');
 const sessions = new Map();
 
 function readDb() {
@@ -21,6 +26,45 @@ function writeDb(db) {
   const tmp = DB_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, DB_FILE);
+}
+async function supabaseRequest(table, query = '', options = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, {
+    method: options.method || 'GET',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      ...(options.method === 'POST' || options.method === 'PATCH' ? { Prefer: 'return=representation' } : {})
+    },
+    ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+    signal: AbortSignal.timeout(10000)
+  });
+  if (!response.ok) throw new Error(`Database request failed (${response.status}).`);
+  return response.status === 204 ? [] : response.json();
+}
+async function findUserByUsername(username) {
+  if (!useSupabase) return readDb().users.find(item => item.username === username) || null;
+  const rows = await supabaseRequest('users', `?select=id,username,salt,hash&username=eq.${encodeURIComponent(username)}&limit=1`);
+  return rows[0] || null;
+}
+async function findUserById(id) {
+  if (!useSupabase) return readDb().users.find(item => item.id === id) || null;
+  const rows = await supabaseRequest('users', `?select=id,username,salt,hash&id=eq.${encodeURIComponent(id)}&limit=1`);
+  return rows[0] || null;
+}
+async function createUser(user) {
+  if (!useSupabase) { const db = readDb(); db.users.push(user); db.portfolios[user.id] = []; writeDb(db); return; }
+  await supabaseRequest('users', '', { method: 'POST', body: user });
+  await supabaseRequest('user_data', '', { method: 'POST', body: { user_id: user.id } });
+}
+async function getUserCollection(userId, collection) {
+  if (!useSupabase) return readDb()[collection]?.[userId] || [];
+  const rows = await supabaseRequest('user_data', `?select=${collection}&user_id=eq.${encodeURIComponent(userId)}&limit=1`);
+  return rows[0]?.[collection] || [];
+}
+async function setUserCollection(userId, collection, value) {
+  if (!useSupabase) { const db = readDb(); db[collection][userId] = value; writeDb(db); return; }
+  await supabaseRequest('user_data', `?user_id=eq.${encodeURIComponent(userId)}`, { method: 'PATCH', body: { [collection]: value } });
 }
 function send(res, status, payload, headers = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -39,13 +83,17 @@ function tokenFrom(req) {
   const match = cookie.match(/(?:^|;\s*)session=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : '';
 }
-function currentUser(req) {
+async function currentUser(req) {
   const session = sessions.get(tokenFrom(req));
   if (!session) return null;
-  return readDb().users.find(user => user.id === session.userId) || null;
+  return findUserById(session.userId);
 }
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('hex')) => ({ salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') });
 function safeUser(user) { return { id: user.id, username: user.username }; }
+function sessionCookie(token, maxAge = '') {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return `session=${token}; HttpOnly; SameSite=Lax; Path=/${secure}${maxAge}`;
+}
 function todayInIndia() {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
@@ -93,44 +141,44 @@ function roundMoney(value) { return Math.round((value + Number.EPSILON) * 100) /
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const method = req.method;
+  if (method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
   if (method === 'POST' && url.pathname === '/api/register') {
     const body = await readBody(req);
     const username = String(body.username || '').trim().toLowerCase();
     const password = String(body.password || '');
     if (!/^[a-z0-9_.-]{3,32}$/.test(username)) return send(res, 400, { error: 'Username must be 3–32 characters (letters, numbers, dot, underscore or dash).' });
     if (password.length < 8 || password.length > 200) return send(res, 400, { error: 'Password must be at least 8 characters.' });
-    const db = readDb();
-    if (db.users.some(user => user.username === username)) return send(res, 409, { error: 'That username is already registered.' });
+    if (await findUserByUsername(username)) return send(res, 409, { error: 'That username is already registered.' });
     const creds = hashPassword(password);
     const user = { id: crypto.randomUUID(), username, ...creds };
-    db.users.push(user); db.portfolios[user.id] = []; writeDb(db);
+    await createUser(user);
     const token = crypto.randomBytes(32).toString('hex'); sessions.set(token, { userId: user.id });
-    return send(res, 201, { user: safeUser(user) }, { 'Set-Cookie': `session=${token}; HttpOnly; SameSite=Strict; Path=/` });
+    return send(res, 201, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token) });
   }
   if (method === 'POST' && url.pathname === '/api/login') {
     const body = await readBody(req), username = String(body.username || '').trim().toLowerCase(), password = String(body.password || '');
-    const db = readDb(), user = db.users.find(item => item.username === username);
+    const user = await findUserByUsername(username);
     if (!user) return send(res, 401, { error: 'Incorrect username or password.' });
     const check = crypto.scryptSync(password, user.salt, 64);
     if (!crypto.timingSafeEqual(check, Buffer.from(user.hash, 'hex'))) return send(res, 401, { error: 'Incorrect username or password.' });
     const token = crypto.randomBytes(32).toString('hex'); sessions.set(token, { userId: user.id });
-    return send(res, 200, { user: safeUser(user) }, { 'Set-Cookie': `session=${token}; HttpOnly; SameSite=Strict; Path=/` });
+    return send(res, 200, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token) });
   }
   if (method === 'POST' && url.pathname === '/api/logout') {
-    sessions.delete(tokenFrom(req)); return send(res, 200, { ok: true }, { 'Set-Cookie': 'session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+    sessions.delete(tokenFrom(req)); return send(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', '; Max-Age=0') });
   }
   if (method === 'GET' && url.pathname === '/api/me') {
     const user = currentUser(req); return user ? send(res, 200, { user: safeUser(user) }) : send(res, 401, { error: 'Please sign in.' });
   }
-  const user = currentUser(req);
+    const user = await currentUser(req);
   if (url.pathname.startsWith('/api/')) {
     if (!user) return send(res, 401, { error: 'Please sign in.' });
-    if (method === 'GET' && url.pathname === '/api/holdings') return send(res, 200, { holdings: readDb().portfolios[user.id] || [] });
-    if (method === 'GET' && url.pathname === '/api/insurance') return send(res, 200, { policies: readDb().insurance[user.id] || [] });
-    if (method === 'GET' && url.pathname === '/api/loans') return send(res, 200, { loans: readDb().loans[user.id] || [] });
+    if (method === 'GET' && url.pathname === '/api/holdings') return send(res, 200, { holdings: await getUserCollection(user.id, 'portfolios') });
+    if (method === 'GET' && url.pathname === '/api/insurance') return send(res, 200, { policies: await getUserCollection(user.id, 'insurance') });
+    if (method === 'GET' && url.pathname === '/api/loans') return send(res, 200, { loans: await getUserCollection(user.id, 'loans') });
     if (method === 'POST' && url.pathname === '/api/refresh-loans') {
       await readBody(req);
-      const db = readDb(), userLoans = db.loans[user.id] || [], today = todayInIndia();
+      const userLoans = await getUserCollection(user.id, 'loans'), today = todayInIndia();
       let updated = 0;
       for (const loan of userLoans) {
         if (loan.status === 'Closed') { loan.outstandingPrincipal = 0; continue; }
@@ -156,7 +204,7 @@ async function route(req, res) {
         loan.lastRefreshedDate = today;
         updated++;
       }
-      db.loans[user.id] = userLoans; writeDb(db);
+      await setUserCollection(user.id, 'loans', userLoans);
       return send(res, 200, { loans: userLoans, updated, asOf: today });
     }
     if (method === 'PUT' && url.pathname === '/api/loans') {
@@ -172,7 +220,7 @@ async function route(req, res) {
         if (!Number.isFinite(principalAtStart) || principalAtStart < 0 || !Number.isFinite(principalPaid) || !Number.isFinite(interestPaid) || interestPaid < 0 || !Number.isInteger(processedEmis) || processedEmis < 0) throw new Error('Invalid loan repayment history.');
         return { id: String(loan.id || crypto.randomUUID()), loanType: loan.loanType.trim().slice(0, 100), underlyingAsset: loan.underlyingAsset.trim().slice(0, 150), outstandingPrincipal, monthlyEmi, interestRate, emiStartDate, status, principalAtStart, principalPaid, interestPaid, processedEmis };
       });
-      const db = readDb(); db.loans[user.id] = clean; writeDb(db); return send(res, 200, { loans: clean });
+      await setUserCollection(user.id, 'loans', clean); return send(res, 200, { loans: clean });
     }
     if (method === 'PUT' && url.pathname === '/api/insurance') {
       const body = await readBody(req);
@@ -186,7 +234,7 @@ async function route(req, res) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || toDate < fromDate) throw new Error('Enter a valid policy period.');
         return { id: String(policy.id || crypto.randomUUID()), insuredPerson: policy.insuredPerson.trim().slice(0, 100), type: policy.type, company: policy.company.trim().slice(0, 100), policyNumber: policy.policyNumber.trim().slice(0, 100), sumInsured, fromDate, toDate, premium };
       });
-      const db = readDb(); db.insurance[user.id] = clean; writeDb(db); return send(res, 200, { policies: clean });
+      await setUserCollection(user.id, 'insurance', clean); return send(res, 200, { policies: clean });
     }
     if (method === 'PUT' && url.pathname === '/api/holdings') {
       const body = await readBody(req);
@@ -216,11 +264,11 @@ async function route(req, res) {
         }
         return { id: String(item.id || crypto.randomUUID()), type: item.type, name: item.name.slice(0, 100), ...allowed };
       });
-      const db = readDb(); db.portfolios[user.id] = clean; writeDb(db); return send(res, 200, { holdings: clean });
+      await setUserCollection(user.id, 'portfolios', clean); return send(res, 200, { holdings: clean });
     }
     if (method === 'POST' && url.pathname === '/api/refresh-navs') {
       await readBody(req);
-      const db = readDb(), portfolio = db.portfolios[user.id] || [], funds = portfolio.filter(item => item.type === 'mf');
+      const portfolio = await getUserCollection(user.id, 'portfolios'), funds = portfolio.filter(item => item.type === 'mf');
       if (!funds.length) return send(res, 200, { holdings: portfolio, updated: 0, sipAdded: 0, failed: [] });
       const failed = []; let updated = 0, sipAdded = 0;
       for (let index = 0; index < funds.length; index += 4) {
@@ -268,7 +316,7 @@ async function route(req, res) {
           } catch (error) { failed.push({ name: item.name, error: error.message || 'NAV refresh failed.' }); }
         }));
       }
-      if (updated || sipAdded) { db.portfolios[user.id] = portfolio; writeDb(db); }
+      if (updated || sipAdded) await setUserCollection(user.id, 'portfolios', portfolio);
       return send(res, 200, { holdings: portfolio, updated, sipAdded, failed });
     }
     const navMatch = url.pathname.match(/^\/api\/mf\/([^/]+)$/);
@@ -295,4 +343,7 @@ async function route(req, res) {
     res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(content);
   });
 }
-http.createServer((req, res) => route(req, res).catch(error => send(res, 400, { error: error.message || 'Request failed.' }))).listen(PORT, '127.0.0.1', () => console.log(`Investment tracker running at http://127.0.0.1:${PORT}`));
+http.createServer((req, res) => route(req, res).catch(error => {
+  console.error(error);
+  send(res, error.message?.startsWith('Database request failed') ? 503 : 400, { error: error.message || 'Request failed.' });
+})).listen(PORT, HOST, () => console.log(`Finspire listening on ${HOST}:${PORT}`));
