@@ -32,7 +32,7 @@ function setDashboardValuesVisible(visible) {
 }
 $('#toggle-dashboard-values').addEventListener('click', () => setDashboardValuesVisible(!dashboardValuesVisible));
 function setAuth(mode) { authMode = mode; $('#auth-title').textContent = mode === 'login' ? 'Welcome back.' : 'Start building wealth.'; $('#auth-subtitle').textContent = mode === 'login' ? 'Sign in to your private investment dashboard.' : 'Create a local account for your portfolio.'; $('#auth-submit').innerHTML = mode === 'login' ? 'Sign in <span>→</span>' : 'Create account <span>→</span>'; $('#auth-toggle').innerHTML = mode === 'login' ? 'New here? <button type="button">Create an account</button>' : 'Already have an account? <button type="button">Sign in</button>'; $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; const confirmLabel = $('#confirm-password-label'), confirmPassword = $('#auth-confirm-password'); confirmLabel.hidden = mode === 'login'; confirmPassword.required = mode === 'register'; confirmPassword.value = ''; $('#auth-error').textContent = ''; }
-function openApp(nextUser) { user = nextUser; setDashboardValuesVisible(false); $('#auth-view').hidden = true; $('#app').hidden = false; $('#profile-name').textContent = user.username; $('#avatar').textContent = user.username.slice(0, 1).toUpperCase(); $('#today').textContent = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date()); $('#greeting-date').textContent = new Intl.DateTimeFormat('en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase(); refreshHoldings(); refreshInsurance(); refreshLoans(); }
+function openApp(nextUser) { user = nextUser; setDashboardValuesVisible(false); $('#auth-view').hidden = true; $('#app').hidden = false; $('#profile-name').textContent = user.username; $('#avatar').textContent = user.username.slice(0, 1).toUpperCase(); $('#greeting-date').textContent = new Intl.DateTimeFormat('en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase(); refreshHoldings(); refreshInsurance(); refreshLoans(); }
 function openAuth() { $('#app').hidden = true; $('#auth-view').hidden = false; }
 $('#auth-toggle').addEventListener('click', e => { if (e.target.tagName === 'BUTTON') setAuth(authMode === 'login' ? 'register' : 'login'); });
 $('#auth-form').addEventListener('submit', async e => { e.preventDefault(); $('#auth-error').textContent = ''; if (authMode === 'register' && $('#auth-password').value !== $('#auth-confirm-password').value) { $('#auth-error').textContent = 'Passwords do not match.'; $('#auth-confirm-password').focus(); return; } const button = $('#auth-submit'); button.disabled = true; try { const result = await api(`/api/${authMode}`, { method: 'POST', body: JSON.stringify({ username: $('#auth-username').value, password: $('#auth-password').value }) }); openApp(result.user); } catch (error) { $('#auth-error').textContent = error.message; } finally { button.disabled = false; } });
@@ -108,10 +108,20 @@ function rdInstallments(item) {
   return Math.max(0, Math.min(number(item.tenure), count));
 }
 function investedValue(item) { if (item.type === 'stock' || item.type === 'mf') return number(item.invested) > 0 ? number(item.invested) : number(item.units) * number(item.price); if (item.type === 'ppf') return ppfBalance(item); if (item.type === 'fd') return number(item.amount); if (item.type === 'rd') return number(item.monthly) * rdInstallments(item); return 0; }
+function activeMonthlyInvestments() {
+  const today = todayIso();
+  return holdings.reduce((sum, item) => {
+    if (item.type === 'mf' && item.sipEnabled && item.sipStartDate && item.sipStartDate <= today) return sum + number(item.sipAmount);
+    if (item.type === 'ppf' && item.monthlyEnabled && item.monthlyStartDate && item.monthlyStartDate <= today) return sum + number(item.monthlyAmount);
+    if (item.type === 'rd' && item.openDate && item.openDate <= today && rdInstallments(item) < number(item.tenure)) return sum + number(item.monthly);
+    return sum;
+  }, 0);
+}
 function render() {
+  updateMaturityNotifications();
   const visible = holdings.filter(item => filterType === 'all' || item.type === filterType);
   const totalValue = holdings.reduce((sum, item) => sum + estimatedValue(item), 0);
-  $('#net-worth').textContent = money(totalValue); $('#donut-total').textContent = money(totalValue); $('#networth-holdings').textContent = `${holdings.length} investment${holdings.length === 1 ? '' : 's'}`; $('#holding-count').textContent = holdings.length; $('#nav-count').textContent = holdings.length;
+  $('#net-worth').textContent = money(totalValue); $('#donut-total').textContent = money(totalValue); $('#networth-holdings').textContent = `${holdings.length} investment${holdings.length === 1 ? '' : 's'}`; $('#holding-count').textContent = holdings.length; $('#nav-count').textContent = holdings.length; $('#monthly-investment-total').textContent = money(activeMonthlyInvestments());
   const assetTotals = Object.keys(ASSETS).map((type, index) => { const group = holdings.filter(item => item.type === type); const value = group.reduce((sum, item) => sum + estimatedValue(item), 0); $(`#value-${type}`).textContent = money(value); $(`#count-${type}`).textContent = `${group.length} ${type === 'ppf' ? 'account' : type === 'stock' || type === 'mf' ? 'holding' : 'deposit'}${group.length === 1 ? '' : 's'}`; return { type, value, index }; }); const mainGrid = $('.main-stat-grid'); mainGrid.append($('.networth-card'), $('#loans-stat'), $('#insurance-stat')); const investmentGrid = $('.investment-stat-grid'); assetTotals.sort((a, b) => b.value - a.value || a.index - b.index).forEach(asset => { investmentGrid.append($(`[data-asset-type="${asset.type}"]`)); }); updatePortfolioRefreshButtons();
   $('#empty-state').classList.toggle('show', holdings.length === 0); $('#holdings-body').innerHTML = '';
   Object.keys(ASSETS).forEach(type => {
@@ -119,20 +129,49 @@ function render() {
     if (!group.length) return;
     const groupValue = group.reduce((sum, item) => sum + estimatedValue(item), 0);
     const groupRow = document.createElement('tr'); groupRow.className = 'holding-group-row';
-    groupRow.innerHTML = `<td colspan="6"><div class="holding-group-heading"><span class="group-name"><i style="background:${ASSETS[type].color}"></i>${ASSETS[type].label}<small>${group.length} ${group.length === 1 ? 'investment' : 'investments'}</small></span><strong>${money(groupValue)}</strong></div></td>`;
+    groupRow.innerHTML = `<td colspan="7"><div class="holding-group-heading"><span class="group-name"><i style="background:${ASSETS[type].color}"></i>${ASSETS[type].label}<small>${group.length} ${group.length === 1 ? 'investment' : 'investments'}</small></span><strong>${money(groupValue)}</strong></div></td>`;
     $('#holdings-body').append(groupRow);
     group.forEach(item => {
       const value = estimatedValue(item), basis = investedValue(item);
       let quantity = '';
       if (item.type === 'stock' || item.type === 'mf') quantity = `${Number(item.units).toLocaleString('en-IN', { maximumFractionDigits: 4 })} units`;
       else if (item.type === 'ppf') quantity = 'Balance'; else if (item.type === 'fd') quantity = `${item.tenure} months · ${item.rate}%`; else quantity = `₹${Number(item.monthly).toLocaleString('en-IN')}/mo`;
-      const row = document.createElement('tr'); row.innerHTML = `<td><div class="asset-name"><span class="asset-icon ${item.type}">${ASSETS[item.type].icon}</span>${escapeHtml(item.name)}</div></td><td><span class="type-pill">${ASSETS[item.type].short}</span></td><td>${quantity}</td><td>${money(basis)}</td><td><strong>${money(value)}</strong></td><td><div class="row-actions"><button class="row-edit" data-edit="${item.id}" aria-label="Edit ${escapeHtml(item.name)}" title="Edit">✎</button><button class="row-delete" data-delete="${item.id}" aria-label="Remove ${escapeHtml(item.name)}" title="Remove">×</button></div></td>`;
+      const maturity = ['ppf', 'fd', 'rd'].includes(item.type) ? renderInvestmentMaturity(item) : '';
+      const row = document.createElement('tr'); row.innerHTML = `<td><div class="asset-name"><span class="asset-icon ${item.type}">${ASSETS[item.type].icon}</span>${escapeHtml(item.name)}</div></td><td><span class="type-pill">${ASSETS[item.type].short}</span></td><td>${quantity}</td><td>${money(basis)}</td><td><strong>${money(value)}</strong></td><td>${maturity}</td><td><div class="row-actions"><button class="row-edit" data-edit="${item.id}" aria-label="Edit ${escapeHtml(item.name)}" title="Edit">✎</button><button class="row-delete" data-delete="${item.id}" aria-label="Remove ${escapeHtml(item.name)}" title="Remove">×</button></div></td>`;
       $('#holdings-body').append(row);
     });
   });
   const types = [...new Set(holdings.map(item => item.type))]; renderAllocation(totalValue, types); renderBars(); $('#last-saved').textContent = holdings.length ? `UPDATED ${new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }).toUpperCase()}` : 'NO INVESTMENTS YET';
 }
 function escapeHtml(value) { const el = document.createElement('span'); el.textContent = value; return el.innerHTML; }
+function updateMaturityNotifications() {
+  const matured = holdings.filter(item => ['fd', 'rd', 'ppf'].includes(item.type) && renderInvestmentMaturity(item).includes('maturity-ring expired'));
+  const button = $('#notification-button'), count = $('#notification-count'), popover = $('#notification-popover');
+  button.classList.toggle('has-notifications', matured.length > 0);
+  button.setAttribute('aria-label', matured.length ? `${matured.length} matured investment notification${matured.length === 1 ? '' : 's'}` : 'Notifications');
+  button.title = matured.length ? `${matured.length} matured investment${matured.length === 1 ? '' : 's'}` : 'Notifications';
+  count.hidden = matured.length === 0;
+  count.textContent = matured.length > 9 ? '9+' : String(matured.length);
+  popover.innerHTML = matured.length
+    ? `<strong>Matured investments</strong><ul>${matured.map(item => `<li><span>${escapeHtml(item.name)}</span><small>${ASSETS[item.type].short}</small></li>`).join('')}</ul>`
+    : '<p>No new notification</p>';
+}
+$('#notification-button').addEventListener('click', () => {
+  const button = $('#notification-button'), popover = $('#notification-popover');
+  const willOpen = popover.hidden;
+  popover.hidden = !willOpen;
+  button.setAttribute('aria-expanded', String(willOpen));
+});
+document.addEventListener('click', event => {
+  if (event.target.closest('.notification-wrap')) return;
+  $('#notification-popover').hidden = true;
+  $('#notification-button').setAttribute('aria-expanded', 'false');
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  $('#notification-popover').hidden = true;
+  $('#notification-button').setAttribute('aria-expanded', 'false');
+});
 function renderAllocation(total, types) {
   const segments = $('#donut-segments'), legend = $('#allocation-legend'); segments.innerHTML = ''; legend.innerHTML = '';
   if (!total) { legend.innerHTML = '<div class="empty-chart-label">Add investments<br>to see your allocation</div>'; return; }
@@ -149,7 +188,7 @@ function renderBars() {
 const fields = {
   stock: `<div class="form-field full-width"><label for="f-name">Stock name / ticker</label><input id="f-name" required placeholder="e.g. Reliance Industries"></div><div class="form-field"><label for="f-units">Units to add</label><input id="f-units" type="number" min="0.000001" step="any" required placeholder="10"></div><div class="form-field"><label for="f-price">Price per share (₹)</label><input id="f-price" type="number" min="0.01" step="any" required placeholder="Enter share price"></div><div class="form-field full-width" id="basis-field" hidden><label for="f-existing-cost">Total invested amount (₹)</label><input id="f-existing-cost" type="number" min="0" step="any" placeholder="Auto from units × price"></div><p class="form-hint full-width">Enter the units in this purchase. Matching stock entries are combined and the invested amount is recalculated using this price.</p>`,
   mf: `<div class="form-field full-width"><label for="f-code">AMFI scheme code</label><div class="inline-input"><input id="f-code" inputmode="numeric" required placeholder="e.g. 120503"><button type="button" class="btn btn-small" id="fetch-nav">Fetch NAV</button></div><p class="form-hint" id="nav-status">Latest NAV is fetched from mfapi.in when you save.</p></div><div class="form-field full-width"><label for="f-name">Fund name</label><input id="f-name" required placeholder="Fetched from scheme code"></div><div class="form-field"><label for="f-units">Units to add</label><input id="f-units" type="number" min="0.000001" step="any" required placeholder="10"></div><div class="form-field"><label for="f-nav">Latest NAV (₹)</label><input id="f-nav" type="number" min="0.0001" step="any" required placeholder="Fetched automatically"></div><div class="form-field full-width" id="basis-field" hidden><label for="f-existing-cost">Total invested amount (₹)</label><input id="f-existing-cost" type="number" min="0" step="any" placeholder="Auto from units × NAV"></div><label class="sip-toggle full-width"><input id="f-sip-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly SIP</strong><small>Buy units automatically on each scheduled date when you refresh</small></span></label><div class="sip-fields full-width" id="sip-fields" hidden><div class="form-field"><label for="f-sip-amount">SIP amount per month (₹)</label><input id="f-sip-amount" type="number" min="0.01" step="any" placeholder="5000"></div><div class="form-field"><label for="f-sip-start-date">First SIP date</label><input id="f-sip-start-date" type="date"></div><p class="form-hint full-width">On each refresh, the app uses the NAV on the SIP date or the next available NAV date. Processed installments are not added twice.</p></div><p class="form-hint full-width">Enter the units in this purchase. Matching fund entries are combined using the latest NAV.</p>`,
-  ppf: `<div class="form-field full-width"><label for="f-name">Account label</label><input id="f-name" required value="PPF account" placeholder="e.g. PPF — primary"></div><div class="form-field full-width"><label for="f-contribution">One-time contribution (₹)</label><input id="f-contribution" type="number" min="0.01" step="any" required placeholder="150000"></div><label class="sip-toggle full-width"><input id="f-ppf-monthly-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly investment</strong><small>Add a recurring contribution to this PPF account</small></span></label><div class="sip-fields full-width" id="ppf-monthly-fields" hidden><div class="form-field"><label for="f-ppf-monthly-amount">Monthly amount (₹)</label><input id="f-ppf-monthly-amount" type="number" min="0.01" step="any" placeholder="5000"></div><div class="form-field"><label for="f-ppf-monthly-start-date">Start date</label><input id="f-ppf-monthly-start-date" type="date"></div><p class="form-hint full-width">Monthly contributions are counted from the start date through the latest scheduled date up to today.</p></div><p class="form-hint full-width">The one-time contribution is added to the matching PPF account balance.</p>`,
+  ppf: `<div class="form-field full-width"><label for="f-name">Account label</label><input id="f-name" required value="PPF account" placeholder="e.g. PPF — primary"></div><div class="form-field full-width"><label for="f-contribution">One-time contribution (₹)</label><input id="f-contribution" type="number" min="0.01" step="any" required placeholder="150000"></div><div class="form-field full-width"><label for="f-date">Account open date (for maturity tracking)</label><input id="f-date" type="date"></div><label class="sip-toggle full-width"><input id="f-ppf-monthly-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly investment</strong><small>Add a recurring contribution to this PPF account</small></span></label><div class="sip-fields full-width" id="ppf-monthly-fields" hidden><div class="form-field"><label for="f-ppf-monthly-amount">Monthly amount (₹)</label><input id="f-ppf-monthly-amount" type="number" min="0.01" step="any" placeholder="5000"></div><div class="form-field"><label for="f-ppf-monthly-start-date">Start date</label><input id="f-ppf-monthly-start-date" type="date"></div><p class="form-hint full-width">Monthly contributions are counted from the start date through the latest scheduled date up to today.</p></div><p class="form-hint full-width">The one-time contribution is added to the matching PPF account balance.</p>`,
   fd: `<div class="form-field full-width"><label for="f-name">Deposit label</label><input id="f-name" required placeholder="e.g. HDFC Bank FD"></div><div class="form-field"><label for="f-amount">Principal amount (₹)</label><input id="f-amount" type="number" min="1" step="any" required placeholder="500000"></div><div class="form-field"><label for="f-rate">Annual interest rate (%)</label><input id="f-rate" type="number" min="0.01" step="any" required placeholder="7.25"></div><div class="form-field"><label for="f-tenure">Tenure (months)</label><input id="f-tenure" type="number" min="1" step="1" required placeholder="24"></div><div class="form-field"><label for="f-date">Start date</label><input id="f-date" type="date" value="${todayIso()}" required></div><p class="form-hint full-width">A fixed deposit is a one-time investment. Use Edit to update its details.</p>`,
   rd: `<div class="form-field full-width"><label for="f-name">Deposit label</label><input id="f-name" required placeholder="e.g. SBI Recurring Deposit"></div><div class="form-field"><label for="f-monthly">Monthly deposit (₹)</label><input id="f-monthly" type="number" min="1" step="any" required placeholder="10000"></div><div class="form-field"><label for="f-rate">Annual interest rate (%)</label><input id="f-rate" type="number" min="0" step="any" required placeholder="6.5"></div><div class="form-field"><label for="f-tenure">Tenure (months)</label><input id="f-tenure" type="number" min="1" step="1" required placeholder="36"></div><div class="form-field"><label for="f-date">Open date</label><input id="f-date" type="date" value="${todayIso()}" required></div><p class="form-hint full-width">Use Edit to update this recurring deposit. Invested amount counts installments due from the open date.</p>`
 };
@@ -158,7 +197,7 @@ function openModal(item = null) { editingId = item?.id || null; $('#modal-backdr
   const set = (id, value) => { const input = $(`#f-${id}`); if (input) input.value = value ?? ''; };
   set('name', item.name);
   if (item.type === 'stock' || item.type === 'mf') { set('code', item.schemeCode); set('units', item.units); set('existing-cost', investedValue(item)); set(item.type === 'stock' ? 'price' : 'nav', item.type === 'stock' ? item.price : item.nav || item.price); if (item.type === 'mf') { $('#f-sip-enabled').checked = Boolean(item.sipEnabled); set('sip-amount', item.sipAmount); set('sip-start-date', item.sipStartDate); $('#sip-fields').hidden = !item.sipEnabled; } }
-  if (item.type === 'ppf') { set('contribution', item.balance); $('#f-ppf-monthly-enabled').checked = Boolean(item.monthlyEnabled); set('ppf-monthly-amount', item.monthlyAmount); set('ppf-monthly-start-date', item.monthlyStartDate); $('#ppf-monthly-fields').hidden = !item.monthlyEnabled; }
+  if (item.type === 'ppf') { set('contribution', item.balance); set('date', item.openDate); $('#f-ppf-monthly-enabled').checked = Boolean(item.monthlyEnabled); set('ppf-monthly-amount', item.monthlyAmount); set('ppf-monthly-start-date', item.monthlyStartDate); $('#ppf-monthly-fields').hidden = !item.monthlyEnabled; }
   if (item.type === 'fd') { set('amount', item.amount); set('rate', item.rate); set('tenure', item.tenure); set('date', item.openDate); }
   if (item.type === 'rd') { set('monthly', item.monthly); set('rate', item.rate); set('tenure', item.tenure); set('date', item.openDate); }
 }
@@ -210,11 +249,11 @@ $('#investment-form').addEventListener('submit', async e => {
       if (!amount) throw new Error('Enter a contribution amount.');
       if (monthlyEnabled && (!monthlyAmount || !monthlyStartDate)) throw new Error('Enter a monthly investment amount and start date.');
       const monthlyConfig = { monthlyEnabled, monthlyAmount: monthlyEnabled ? monthlyAmount : 0, monthlyStartDate: monthlyEnabled ? monthlyStartDate : '' };
-      if (editingId) item = { type: 'ppf', name, balance: amount, invested: amount, ...monthlyConfig };
+      if (editingId) item = { type: 'ppf', name, balance: amount, invested: amount, openDate: get('date') || '', ...monthlyConfig };
       else {
         const match = holdings.find(holding => holding.type === 'ppf' && holding.name.trim().toLowerCase() === name.toLowerCase());
-        if (match) { mergeTarget = match.id; const config = monthlyEnabled ? monthlyConfig : { monthlyEnabled: Boolean(match.monthlyEnabled), monthlyAmount: number(match.monthlyAmount), monthlyStartDate: match.monthlyStartDate || '' }; item = { ...match, name, balance: number(match.balance) + amount, invested: number(match.invested || match.balance) + amount, ...config }; }
-        else item = { type: 'ppf', name, balance: amount, invested: amount, ...monthlyConfig };
+        if (match) { mergeTarget = match.id; const config = monthlyEnabled ? monthlyConfig : { monthlyEnabled: Boolean(match.monthlyEnabled), monthlyAmount: number(match.monthlyAmount), monthlyStartDate: match.monthlyStartDate || '' }; item = { ...match, name, balance: number(match.balance) + amount, invested: number(match.invested || match.balance) + amount, openDate: get('date') || match.openDate || '', ...config }; }
+        else item = { type: 'ppf', name, balance: amount, invested: amount, openDate: get('date') || '', ...monthlyConfig };
       }
     }
     if (activeType === 'fd') item = { type: 'fd', name: get('name').trim(), amount: number(get('amount')), rate: number(get('rate')), tenure: number(get('tenure')), openDate: get('date') };
@@ -250,6 +289,47 @@ function dateLabel(value) {
   const [year, month, day] = value.split('-').map(Number);
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(year, month - 1, day));
 }
+function renderInvestmentMaturity(item) {
+  const today = todayIso();
+  let startDate = '', endDate = '', description = '';
+  const addMonths = (value, months) => {
+    const [year, month, day] = String(value || '').split('-').map(Number);
+    if (!year || !month || !day) return '';
+    const target = new Date(year, month - 1 + months, 1);
+    const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+    target.setDate(Math.min(day, lastDay));
+    return todayIsoFromDate(target);
+  };
+  if (item.type === 'fd') {
+    startDate = item.openDate;
+    endDate = addMonths(startDate, number(item.tenure));
+    description = 'FD maturity';
+  } else if (item.type === 'rd') {
+    startDate = item.openDate;
+    endDate = addMonths(startDate, number(item.tenure));
+    description = 'RD maturity';
+  } else {
+    startDate = item.openDate || item.monthlyStartDate;
+    const [ppfStartYear, ppfStartMonth] = String(startDate || '').split('-').map(Number);
+    if (!ppfStartYear || !ppfStartMonth) return '';
+    const financialYearStart = ppfStartYear - (ppfStartMonth < 4 ? 1 : 0);
+    startDate = `${financialYearStart}-04-01`;
+    endDate = `${financialYearStart + 16}-04-01`;
+    description = 'PPF maturity';
+  }
+  if (!endDate) return '';
+  const utcDay = value => { const [year, month, day] = String(value || '').split('-').map(Number); return year && month && day ? Date.UTC(year, month - 1, day) : NaN; };
+  const dayMs = 86400000, start = utcDay(startDate), end = utcDay(endDate), current = utcDay(today);
+  const totalDays = Math.max(1, Math.round((end - start) / dayMs) + 1);
+  const expired = !Number.isFinite(end) || current > end;
+  const daysLeft = expired ? 0 : Math.max(1, Math.ceil((end - current) / dayMs) + 1);
+  const remainingPercent = expired ? 0 : Math.min(100, daysLeft / totalDays * 100);
+  const radius = 18, circumference = 2 * Math.PI * radius, offset = circumference * (1 - remainingPercent / 100);
+  const centerLabel = daysLeft > 999 ? `${Math.round(daysLeft / 365)}y` : `${daysLeft}d`;
+  const label = expired ? `${description} date passed` : `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining until ${description.toLowerCase()}`;
+  return `<div class="investment-maturity"><span class="maturity-ring${expired ? ' expired' : ''}" role="img" aria-label="${label}; ${Math.round(remainingPercent)}% of term remaining"><svg viewBox="0 0 44 44" aria-hidden="true"><circle class="maturity-track" cx="22" cy="22" r="${radius}"/><circle class="maturity-progress" cx="22" cy="22" r="${radius}" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}" transform="rotate(-90 22 22)"/></svg><span>${centerLabel}</span></span><span class="maturity-copy"><strong>${expired ? 'Matured' : `${daysLeft} day${daysLeft === 1 ? '' : 's'}`}</strong><small>${expired ? 'Maturity date passed' : 'until maturity'}</small></span></div>`;
+}
+function todayIsoFromDate(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function renderPolicyMaturity(policy) {
   const utcDay = value => { const [year, month, day] = String(value || '').split('-').map(Number); return year && month && day ? Date.UTC(year, month - 1, day) : NaN; };
   const dayMs = 86400000, start = utcDay(policy.fromDate), end = utcDay(policy.toDate), today = utcDay(todayIso());

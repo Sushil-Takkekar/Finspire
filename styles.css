@@ -14,6 +14,7 @@
 /* Insurance workspace */
 .insurance-page[hidden]{display:none}.insurance-panel{padding:0;margin-top:18px}.insurance-heading{padding:18px 19px 14px}.insurance-table{min-width:940px}.insurance-table td{vertical-align:middle}.insurance-modal{width:min(100%,700px)}.insurance-modal .form-grid{gap:0 16px}.insurance-modal .modal-actions{margin-top:5px}.insurance-page .page-heading>.btn{align-self:center}
 .annual-premium-card{margin-top:18px;padding:16px 19px;display:flex;align-items:center;justify-content:space-between;background:#f2f7e8;border-color:#e6efd6}.annual-premium-card>div{display:grid;gap:5px}.annual-premium-value{font:700 24px var(--display);letter-spacing:-.7px}.annual-premium-note{font-size:10px;color:#858e7d}
+.insurance-page .annual-premium-card{background:#eef4fc;border-color:#dce8f8}.insurance-page .annual-premium-card .stat-icon{background:#dce8f8;color:#5277aa}
 .debt-page[hidden]{display:none}.debt-panel{padding:0;margin-top:18px}.debt-table{min-width:1050px}.debt-table td{vertical-align:middle}.debt-table .loan-main-row td{border-bottom:0}.loan-name-cell{display:flex;align-items:center;gap:8px}.loan-expand{width:21px;height:21px;flex:none;border:1px solid #e5e9df;border-radius:6px;background:#f7f9f3;color:#65735c;line-height:1;padding:0;font-size:14px}.loan-expand:hover{background:#edf4e3;border-color:#dbe8c8}.emi-breakdown{overflow:visible!important}.emi-hover-trigger{position:relative;cursor:help;text-decoration:underline dotted #a9b39e;text-underline-offset:3px;white-space:nowrap}.emi-tooltip{display:none;position:absolute;z-index:8;left:0;top:calc(100% + 9px);min-width:220px;padding:11px 13px;background:#263e2d;color:#fff;border-radius:7px;box-shadow:0 7px 22px #18251c38;text-decoration:none;white-space:normal}.emi-tooltip:before{content:'';position:absolute;left:13px;top:-5px;width:10px;height:10px;background:#263e2d;transform:rotate(45deg)}.emi-tooltip>span{position:relative;display:flex;justify-content:space-between;gap:16px;align-items:center}.emi-tooltip>span+span{margin-top:8px;padding-top:8px;border-top:1px solid #ffffff20}.emi-tooltip small{font-size:10px;color:#c6d0c5}.emi-tooltip strong{font:500 11px var(--mono);color:#fff;white-space:nowrap}.emi-hover-trigger:hover .emi-tooltip,.emi-hover-trigger:focus .emi-tooltip,.emi-hover-trigger:focus-within .emi-tooltip{display:grid}.debt-table .loan-subrow td{padding:3px 13px 13px 31px;border-bottom:1px solid #f0f2ed}.loan-dropdown{border:1px solid #e9eee2;border-left:3px solid #b8d97a;border-radius:0 8px 8px 8px;background:#fafbf8;box-shadow:0 3px 10px #2a3a1a08}.loan-subrow-grid{display:grid;grid-template-columns:repeat(2,minmax(180px,280px));gap:16px;padding:13px 16px 12px 19px}.loan-subrow-grid>div{display:grid;gap:5px}.loan-subrow-grid span{font:9px var(--mono);letter-spacing:.4px;color:#92998e}.loan-subrow-grid strong{font:600 12px var(--font);color:#3b4538}.loan-modal{width:min(100%,700px)}.loan-status{display:inline-block;border-radius:10px;background:#eef4e7;color:#58743d;padding:4px 8px;font-size:10px;font-weight:600}.loan-status.closed{background:#f0f1ef;color:#7e857b}
 @media(max-width:720px){.sidebar{display:flex;align-items:center;gap:16px;overflow-x:auto}.sidebar .brand{flex:none}.sidebar .workspace-label{display:none}.sidebar nav{display:flex;gap:4px}.nav-link{white-space:nowrap;padding:0 9px;font-size:11px}.nav-count{display:none}.sidebar .sidebar-bottom{display:none}.insurance-page .page-heading{gap:10px}.insurance-modal .form-grid{grid-template-columns:1fr}.insurance-page .page-heading>.btn{font-size:11px;width:auto;padding:10px 12px;display:block;white-space:nowrap}}
 
@@ -275,6 +276,14 @@
 }
 
 .insurance-table { min-width: 1080px; }
+.holdings-panel table th:nth-child(6),
+.holdings-panel table td:nth-child(6) { min-width: 150px; }
+.investment-maturity { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
+.investment-maturity .maturity-ring { width: 36px; height: 36px; }
+.investment-maturity .maturity-ring > span { font-size: 8px; }
+.investment-maturity .maturity-copy { gap: 1px; }
+.investment-maturity .maturity-copy strong { font-size: 9px; }
+.investment-maturity .maturity-copy small { font-size: 8px; }
 .insurance-maturity { display: flex; align-items: center; gap: 9px; min-width: 128px; }
 .maturity-ring { width: 44px; height: 44px; position: relative; display: inline-block; flex: none; }
 .maturity-ring svg { display: block; width: 100%; height: 100%; }
@@ -287,6 +296,22 @@
 .maturity-copy { display: grid; gap: 2px; }
 .maturity-copy strong { font-size: 10px; font-weight: 600; color: #465141; }
 .maturity-copy small { font-size: 9px; color: #92998e; }
+
+.notification-wrap { position: relative; }
+.notification-button { position: relative; display: grid; place-items: center; width: 34px; height: 34px; padding: 6px; border: 1px solid #e8ece4; border-radius: 8px; background: #fff; color: #778171; }
+.notification-button:hover { background: #f7f9f3; color: #44543c; }
+.notification-button svg { width: 19px; height: 19px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.notification-button.has-notifications { color: #b65343; border-color: #f0d5cf; }
+.notification-button.has-notifications svg { animation: notification-blink 1s steps(2, start) infinite; }
+.notification-button > span { position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px; border: 2px solid #fff; border-radius: 9px; background: #bd6657; color: #fff; font: 700 8px/12px var(--mono); text-align: center; }
+.notification-popover { position: absolute; z-index: 10; top: calc(100% + 9px); right: 0; width: min(300px, calc(100vw - 30px)); padding: 14px; border: 1px solid #e6eae1; border-radius: 9px; background: #fff; box-shadow: 0 10px 28px #20271e1c; color: #465141; }
+.notification-popover[hidden] { display: none; }
+.notification-popover > strong { display: block; margin-bottom: 8px; font: 700 12px var(--display); }
+.notification-popover p { margin: 0; color: #858e7d; font-size: 12px; }
+.notification-popover ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.notification-popover li { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 11px; }
+.notification-popover li small { color: #92998e; font-size: 9px; }
+@keyframes notification-blink { 50% { opacity: .3; } }
 
 .auth-card form #confirm-password-label[hidden] {
   display: none;
