@@ -14,7 +14,7 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The local account and portf
 
 ## Deploy with Render and Supabase
 
-1. Create a Supabase project and run [`supabase/schema.sql`](supabase/schema.sql) in its SQL Editor.
+1. Create a Supabase project and run [`supabase/schema.sql`](supabase/schema.sql) and [`supabase/storage.sql`](supabase/storage.sql) in its SQL Editor. The storage script creates a private bucket for insurance PDFs.
 2. Import the current local accounts and records before switching to the hosted database. In a local terminal, set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then run:
 
    ```sh
@@ -23,6 +23,8 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The local account and portf
 
    The import keeps existing account IDs and password hashes. The service role key is a secret: use it only in your terminal and Render environment settings; never put it in browser code or commit it.
 3. Push the app to GitHub, then create a Render Blueprint from the repository. Render reads [`render.yaml`](render.yaml); enter `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` when prompted.
+
+Insurance policy PDFs are stored in the private Supabase Storage bucket `insurance-policies`. The server validates PDF files and limits them to 10 MB. Policy document links are issued as short-lived signed URLs after the signed-in owner requests them. Re-running `supabase/storage.sql` safely updates the bucket's privacy, size, and file-type settings.
 4. Open the Render URL and sign in with an imported account, or create a new account.
 
 Render hosts the Node server. The server uses the Supabase service role key to access the private tables; browser requests never receive that key. Set both Supabase environment variables in production. Locally, if they are unset, Finspire continues using `data/db.json`.

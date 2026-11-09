@@ -10,6 +10,8 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const INSURANCE_BUCKET = 'insurance-policies';
+const MAX_POLICY_PDF_BYTES = 10 * 1024 * 1024;
 const useSupabase = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 if (process.env.NODE_ENV === 'production' && !useSupabase) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for production.');
 const sessions = new Map();
@@ -45,6 +47,23 @@ async function supabaseRequest(table, query = '', options = {}) {
   if (!response.ok) throw new Error(`Database request failed (${response.status}).`);
   return response.status === 204 ? [] : response.json();
 }
+async function storageRequest(endpoint, options = {}) {
+  if (!useSupabase) throw new Error('Policy document storage requires Supabase configuration.');
+  const response = await fetch(`${SUPABASE_URL}/storage/v1/${endpoint}`, {
+    method: options.method || 'GET',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      ...(SUPABASE_SERVICE_ROLE_KEY.startsWith('eyJ') ? { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } : {}),
+      ...(options.contentType ? { 'Content-Type': options.contentType } : {}),
+      ...(options.upsert ? { 'x-upsert': 'true' } : {})
+    },
+    ...(options.body ? { body: options.body } : {}),
+    signal: AbortSignal.timeout(20000)
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Policy document storage failed (${response.status})${text ? `: ${text.slice(0, 180)}` : '.'}`);
+  try { return text ? JSON.parse(text) : {}; } catch { return {}; }
+}
 async function findUserByUsername(username) {
   if (!useSupabase) return readDb().users.find(item => item.username === username) || null;
   const rows = await supabaseRequest('users', `?select=id,username,salt,hash&username=eq.${encodeURIComponent(username)}&limit=1`);
@@ -73,10 +92,10 @@ function send(res, status, payload, headers = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(payload));
 }
-function readBody(req) {
+function readBody(req, maxBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
     let raw = '';
-    req.on('data', chunk => { raw += chunk; if (raw.length > 1_000_000) reject(new Error('Request too large')); });
+    req.on('data', chunk => { raw += chunk; if (raw.length > maxBytes) reject(new Error('Request too large')); });
     req.on('end', () => { try { resolve(JSON.parse(raw || '{}')); } catch { reject(new Error('Invalid JSON')); } });
     req.on('error', reject);
   });
@@ -144,6 +163,14 @@ function scheduledSipDates(startValue, endValue) {
   }
   return dates;
 }
+function scheduledMonthlyDate(startValue, monthOffset) {
+  const start = isoDateToUtc(startValue);
+  if (!start) return '';
+  const monthIndex = start.getUTCFullYear() * 12 + start.getUTCMonth() + monthOffset;
+  const year = Math.floor(monthIndex / 12), month = monthIndex % 12;
+  const day = Math.min(start.getUTCDate(), new Date(Date.UTC(year, month + 1, 0)).getUTCDate());
+  return isoUtcDate(new Date(Date.UTC(year, month, day)));
+}
 function mfDateToIso(value) {
   const raw = String(value || '');
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
@@ -203,6 +230,40 @@ async function route(req, res) {
     if (!user) return send(res, 401, { error: 'Please sign in.' });
     if (method === 'GET' && url.pathname === '/api/holdings') return send(res, 200, { holdings: await getUserCollection(user.id, 'portfolios') });
     if (method === 'GET' && url.pathname === '/api/insurance') return send(res, 200, { policies: await getUserCollection(user.id, 'insurance') });
+    if (method === 'POST' && url.pathname === '/api/insurance/document') {
+      if (!useSupabase) return send(res, 503, { error: 'Policy document storage is available when Supabase is configured.' });
+      const body = await readBody(req, 14 * 1024 * 1024);
+      const policyId = String(body.policyId || '');
+      const fileName = String(body.fileName || 'policy.pdf').replace(/[\\/\\\\\u0000-\u001f]/g, '_').slice(0, 120) || 'policy.pdf';
+      const base64 = String(body.data || '');
+      if (!/^[0-9a-f-]{36}$/i.test(policyId) || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) return send(res, 400, { error: 'Invalid policy document upload.' });
+      if (!fileName.toLowerCase().endsWith('.pdf')) return send(res, 400, { error: 'Choose a PDF policy document.' });
+      const pdf = Buffer.from(base64, 'base64');
+      if (!pdf.length || pdf.length > MAX_POLICY_PDF_BYTES) return send(res, 400, { error: 'Policy PDFs must be 10 MB or smaller.' });
+      if (pdf.subarray(0, 5).toString('ascii') !== '%PDF-') return send(res, 400, { error: 'The selected file is not a valid PDF.' });
+      const policies = await getUserCollection(user.id, 'insurance');
+      const policyIndex = policies.findIndex(policy => policy.id === policyId);
+      if (policyIndex < 0) return send(res, 404, { error: 'Insurance policy not found.' });
+      const objectPath = `${user.id}/${policyId}.pdf`;
+      await storageRequest(`object/${INSURANCE_BUCKET}/${objectPath}`, { method: 'POST', contentType: 'application/pdf', upsert: true, body: pdf });
+      policies[policyIndex] = { ...policies[policyIndex], documentName: fileName };
+      await setUserCollection(user.id, 'insurance', policies);
+      return send(res, 200, { policy: policies[policyIndex] });
+    }
+    if (method === 'GET' && url.pathname === '/api/insurance/document') {
+      if (!useSupabase) return send(res, 503, { error: 'Policy document storage is available when Supabase is configured.' });
+      const policyId = String(url.searchParams.get('policyId') || '');
+      if (!/^[0-9a-f-]{36}$/i.test(policyId)) return send(res, 400, { error: 'Invalid insurance policy.' });
+      const policies = await getUserCollection(user.id, 'insurance');
+      const policy = policies.find(item => item.id === policyId && item.documentName);
+      if (!policy) return send(res, 404, { error: 'No document is attached to this policy.' });
+      const signed = await storageRequest(`object/sign/${INSURANCE_BUCKET}/${user.id}/${policyId}.pdf`, { method: 'POST', contentType: 'application/json', body: JSON.stringify({ expiresIn: 60 }) });
+      const signedPath = signed.signedURL || signed.signedUrl;
+      if (!signedPath) throw new Error('Could not create a secure policy document link.');
+      const location = signedPath.startsWith('http') ? signedPath : `${SUPABASE_URL}/storage/v1${signedPath.startsWith('/') ? '' : '/'}${signedPath}`;
+      res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+      return res.end();
+    }
     if (method === 'GET' && url.pathname === '/api/loans') return send(res, 200, { loans: await getUserCollection(user.id, 'loans') });
     if (method === 'POST' && url.pathname === '/api/refresh-loans') {
       await readBody(req);
@@ -254,25 +315,38 @@ async function route(req, res) {
       const body = await readBody(req);
       if (!Array.isArray(body.policies) || body.policies.length > 500) return send(res, 400, { error: 'Invalid insurance policy list.' });
       const kinds = ['Health', 'Term', 'Car', 'House', 'Other'];
+      const previous = await getUserCollection(user.id, 'insurance');
+      const previousById = new Map(previous.map(policy => [policy.id, policy]));
       const clean = body.policies.map(policy => {
         if (!policy || typeof policy.insuredPerson !== 'string' || typeof policy.company !== 'string' || typeof policy.policyNumber !== 'string' || !kinds.includes(policy.type)) throw new Error('Complete all insurance policy details.');
         const sumInsured = Number(policy.sumInsured), premium = Number(policy.premium);
         const fromDate = String(policy.fromDate || ''), toDate = String(policy.toDate || '');
         if (!Number.isFinite(sumInsured) || sumInsured <= 0 || !Number.isFinite(premium) || premium <= 0) throw new Error('Sum insured and premium must be positive amounts.');
         if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || toDate < fromDate) throw new Error('Enter a valid policy period.');
-        return { id: String(policy.id || crypto.randomUUID()), insuredPerson: policy.insuredPerson.trim().slice(0, 100), type: policy.type, company: policy.company.trim().slice(0, 100), policyNumber: policy.policyNumber.trim().slice(0, 100), sumInsured, fromDate, toDate, premium };
+        const id = String(policy.id || crypto.randomUUID());
+        if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('Invalid insurance policy identifier.');
+        return { id, insuredPerson: policy.insuredPerson.trim().slice(0, 100), type: policy.type, company: policy.company.trim().slice(0, 100), policyNumber: policy.policyNumber.trim().slice(0, 100), sumInsured, fromDate, toDate, premium, ...(previousById.get(id)?.documentName ? { documentName: previousById.get(id).documentName } : {}) };
       });
-      await setUserCollection(user.id, 'insurance', clean); return send(res, 200, { policies: clean });
+      await setUserCollection(user.id, 'insurance', clean);
+      if (useSupabase) {
+        const retained = new Set(clean.map(policy => policy.id));
+        await Promise.all(previous.filter(policy => policy.documentName && !retained.has(policy.id)).map(policy => storageRequest(`object/${INSURANCE_BUCKET}/${user.id}/${policy.id}.pdf`, { method: 'DELETE' }).catch(error => console.error('Could not remove deleted policy PDF:', error.message))));
+      }
+      return send(res, 200, { policies: clean });
     }
     if (method === 'PUT' && url.pathname === '/api/holdings') {
       const body = await readBody(req);
       if (!Array.isArray(body.holdings) || body.holdings.length > 500) return send(res, 400, { error: 'Invalid holdings list.' });
-      const kinds = ['stock', 'mf', 'ppf', 'fd', 'rd'];
+      const kinds = ['stock', 'mf', 'ppf', 'fd', 'rd', 'epf'];
       const clean = body.holdings.map(item => {
         if (!item || !kinds.includes(item.type) || typeof item.name !== 'string') throw new Error('Invalid holding.');
         const allowed = {};
-        for (const key of ['units', 'price', 'invested', 'amount', 'rate', 'tenure', 'openDate', 'maturityDate', 'schemeCode', 'nav', 'navDate', 'monthly', 'balance', 'updatedAt', 'sipEnabled', 'sipAmount', 'sipStartDate', 'sipPurchases', 'monthlyEnabled', 'monthlyAmount', 'monthlyStartDate']) {
+        for (const key of ['units', 'price', 'invested', 'amount', 'rate', 'tenure', 'openDate', 'maturityDate', 'schemeCode', 'nav', 'navDate', 'monthly', 'balance', 'updatedAt', 'sipEnabled', 'sipAmount', 'sipStartDate', 'sipPurchases', 'monthlyEnabled', 'monthlyAmount', 'monthlyStartDate', 'employeeContribution', 'employerContribution', 'salaryDate', 'lastContributionDate', 'accountNumber']) {
           if (item[key] !== undefined) allowed[key] = item[key];
+        }
+        if (allowed.accountNumber !== undefined) {
+          if (typeof allowed.accountNumber !== 'string') throw new Error('Account number must be text.');
+          allowed.accountNumber = allowed.accountNumber.trim().slice(0, 100);
         }
         for (const value of Object.values(allowed)) if (typeof value === 'number' && (!Number.isFinite(value) || value < 0)) throw new Error('Amounts must be valid non-negative numbers.');
         if (allowed.sipEnabled !== undefined && typeof allowed.sipEnabled !== 'boolean') throw new Error('SIP enabled must be true or false.');
@@ -281,6 +355,14 @@ async function route(req, res) {
           if (!Number.isFinite(Number(allowed.monthlyAmount)) || Number(allowed.monthlyAmount) <= 0 || !isoDateToUtc(String(allowed.monthlyStartDate || ''))) throw new Error('Enter a valid PPF monthly amount and start date.');
           allowed.monthlyAmount = Number(allowed.monthlyAmount);
           allowed.monthlyStartDate = String(allowed.monthlyStartDate);
+        }
+        if (item.type === 'epf') {
+          const salaryDate = String(allowed.salaryDate || ''), employeeContribution = Number(allowed.employeeContribution), employerContribution = Number(allowed.employerContribution), balance = Number(allowed.balance);
+          if (!Number.isFinite(balance) || balance < 0 || !Number.isFinite(employeeContribution) || employeeContribution < 0 || !Number.isFinite(employerContribution) || employerContribution < 0 || employeeContribution + employerContribution <= 0 || !isoDateToUtc(salaryDate) || isoUtcDate(isoDateToUtc(salaryDate)) !== salaryDate) throw new Error('Enter a valid EPF balance, monthly contributions, and next salary date.');
+          allowed.balance = balance;
+          allowed.employeeContribution = employeeContribution;
+          allowed.employerContribution = employerContribution;
+          allowed.salaryDate = salaryDate;
         }
         if (allowed.sipPurchases !== undefined) {
           if (!Array.isArray(allowed.sipPurchases) || allowed.sipPurchases.length > 1200) throw new Error('Invalid SIP purchase history.');
@@ -293,6 +375,26 @@ async function route(req, res) {
         return { id: String(item.id || crypto.randomUUID()), type: item.type, name: item.name.slice(0, 100), ...allowed };
       });
       await setUserCollection(user.id, 'portfolios', clean); return send(res, 200, { holdings: clean });
+    }
+    if (method === 'POST' && url.pathname === '/api/refresh-epf') {
+      await readBody(req);
+      const portfolio = await getUserCollection(user.id, 'portfolios'), today = todayInIndia();
+      let updated = 0, contributionsAdded = 0;
+      for (const item of portfolio.filter(holding => holding.type === 'epf')) {
+        const salaryDate = String(item.salaryDate || ''), employeeContribution = Number(item.employeeContribution), employerContribution = Number(item.employerContribution);
+        if (!isoDateToUtc(salaryDate) || isoUtcDate(isoDateToUtc(salaryDate)) !== salaryDate || ![employeeContribution, employerContribution, Number(item.balance)].every(value => Number.isFinite(value) && value >= 0)) continue;
+        const dueDates = scheduledSipDates(salaryDate, today);
+        if (!dueDates.length) continue;
+        const contribution = roundMoney((employeeContribution + employerContribution) * dueDates.length);
+        item.balance = roundMoney(Number(item.balance) + contribution);
+        item.invested = item.balance;
+        item.salaryDate = scheduledMonthlyDate(salaryDate, dueDates.length);
+        item.lastContributionDate = dueDates[dueDates.length - 1];
+        contributionsAdded = roundMoney(contributionsAdded + contribution);
+        updated++;
+      }
+      await setUserCollection(user.id, 'portfolios', portfolio);
+      return send(res, 200, { holdings: portfolio, updated, contributionsAdded, asOf: today });
     }
     if (method === 'POST' && url.pathname === '/api/refresh-navs') {
       await readBody(req);
