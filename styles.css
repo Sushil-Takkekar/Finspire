@@ -254,6 +254,23 @@
   align-self: flex-end;
 }
 
+.export-icon-button {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #c4c6c1;
+  border-radius: 7px;
+  background: #b9de6a96;
+  color: #48553d;
+  cursor: pointer;
+}
+.export-icon-button svg { width: 17px; height: 17px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.export-icon-button:hover, .export-icon-button:focus-visible { background: #b9de6ac9; }
+.export-icon-button::after { content: attr(data-tooltip); position: absolute; z-index: 9; right: 0; top: calc(100% + 8px); padding: 7px 9px; border-radius: 5px; background: #263e2d; color: #fff; font: 10px var(--font); white-space: nowrap; box-shadow: 0 4px 12px #18251c25; opacity: 0; visibility: hidden; transform: translateY(-2px); transition: opacity .14s ease, transform .14s ease, visibility .14s; pointer-events: none; }
+.export-icon-button:hover::after, .export-icon-button:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
+
 #refresh-navs .refresh-label,
 #refresh-loans .refresh-label {
   margin-left: 6px;
