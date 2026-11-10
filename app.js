@@ -176,8 +176,8 @@ function pdfWrap(value, maxChars) {
 function makePdfPage(title, subtitle, columns, rows) {
   const pageWidth = 792, pageHeight = 612, left = 36, right = 36, tableWidth = pageWidth - left - right;
   const widths = columns.map(column => column.width * tableWidth / columns.reduce((sum, item) => sum + item.width, 0));
-  const commands = ['0.12 0.20 0.15 rg', `BT /F1 20 Tf ${left} ${pageHeight - 42} Td (${pdfEscape(title)}) Tj ET`, '0.38 0.42 0.37 rg', `BT /F1 9 Tf ${left} ${pageHeight - 60} Td (${pdfEscape(subtitle)}) Tj ET`];
-  let y = pageHeight - 86, pageIndex = 1; const pageStreams = [];
+  const commands = ['0.12 0.20 0.15 rg', `BT /F2 12 Tf ${left} ${pageHeight - 28} Td (Finspire - Portfolio Export) Tj ET`, '0.12 0.20 0.15 rg', `BT /F1 20 Tf ${left} ${pageHeight - 51} Td (${pdfEscape(title)}) Tj ET`, '0.38 0.42 0.37 rg', `BT /F1 9 Tf ${left} ${pageHeight - 68} Td (${pdfEscape(subtitle)}) Tj ET`];
+  let y = pageHeight - 92, pageIndex = 1; const pageStreams = [];
   const drawTableHeader = () => {
     commands.push('0.91 0.94 0.88 rg', `${left} ${y - 20} ${tableWidth} 24 re f`, '0.16 0.22 0.17 rg');
     let x = left;
@@ -187,15 +187,27 @@ function makePdfPage(title, subtitle, columns, rows) {
     y -= 28;
   };
   drawTableHeader();
+  const continuePage = () => {
+    commands.push('0.38 0.42 0.37 rg', `BT /F1 7 Tf ${pageWidth - 92} 22 Td (Page ${pageIndex}) Tj ET`);
+    pageStreams.push(commands.join('\n')); commands.length = 0;
+    pageIndex++; y = pageHeight - 28;
+    commands.push('0.12 0.20 0.15 rg', `BT /F2 12 Tf ${left} ${y} Td (Finspire - Portfolio Export) Tj ET`);
+    commands.push(`BT /F1 16 Tf ${left} ${y - 23} Td (${pdfEscape(title)} - continued) Tj ET`); y = pageHeight - 92; drawTableHeader();
+  };
   rows.forEach((row, rowIndex) => {
+    if (row && row.group) {
+      const followingRow = rows[rowIndex + 1];
+      const followingHeight = Array.isArray(followingRow)
+        ? Math.max(23, Math.max(...columns.map((column, index) => pdfWrap(followingRow[index], Math.max(8, Math.floor((widths[index] - 10) / 4.2))).length)) * 10 + 10)
+        : 23;
+      if (y - 22 - followingHeight < 42) continuePage();
+      commands.push('0.94 0.96 0.91 rg', `${left} ${y - 16} ${tableWidth} 18 re f`, '0.22 0.31 0.22 rg', `BT /F2 9 Tf ${left + 6} ${y - 11} Td (${pdfEscape(row.group)}) Tj ET`);
+      y -= 22;
+      return;
+    }
     const cells = columns.map((column, index) => pdfWrap(row[index], Math.max(8, Math.floor((widths[index] - 10) / 4.2))));
     const lineCount = Math.max(...cells.map(lines => lines.length)); const rowHeight = Math.max(23, lineCount * 10 + 10);
-    if (y - rowHeight < 42) {
-      commands.push('0.38 0.42 0.37 rg', `BT /F1 7 Tf ${pageWidth - 92} 22 Td (Page ${pageIndex}) Tj ET`);
-      pageStreams.push(commands.join('\n')); commands.length = 0;
-      pageIndex++; y = pageHeight - 54;
-      commands.push('0.12 0.20 0.15 rg', `BT /F2 10 Tf ${left} ${y} Td (${pdfEscape(title)} - continued) Tj ET`); y -= 22; drawTableHeader();
-    }
+    if (y - rowHeight < 42) continuePage();
     if (rowIndex % 2 === 1) commands.push('0.97 0.98 0.96 rg', `${left} ${y - rowHeight + 4} ${tableWidth} ${rowHeight} re f`);
     commands.push('0.88 0.90 0.86 RG 0.5 w', `${left} ${y - rowHeight + 4} m ${left + tableWidth} ${y - rowHeight + 4} l S`, '0.18 0.21 0.18 rg');
     let x = left;
@@ -218,10 +230,17 @@ function downloadPortfolioPdf() {
   const confirmed = window.confirm('Download a PDF containing your Investments, Insurance, and Loans details?');
   if (!confirmed) return;
   const formatDate = value => value ? dateLabel(value) : '';
+  const investmentRows = [];
+  Object.keys(ASSETS).forEach(type => {
+    const group = holdings.filter(item => item.type === type);
+    if (!group.length) return;
+    investmentRows.push({ group: ASSETS[type].label });
+    group.forEach(item => investmentRows.push([item.name || ASSETS[type].label, item.accountNumber || '', formatDate(investmentMaturityDate(item))]));
+  });
   const pages = [
     ...makePdfPage('Investments', `Finspire portfolio - generated ${dateLabel(todayIso())}`, [
       { label: 'Asset Name', width: 2.1 }, { label: 'Account Number', width: 1.2 }, { label: 'Maturity Date', width: 1.2 }
-    ], holdings.map(item => [item.name || ASSETS[item.type]?.label || item.type, item.accountNumber || '', formatDate(investmentMaturityDate(item))])),
+    ], investmentRows),
     ...makePdfPage('Insurance', `Finspire portfolio - generated ${dateLabel(todayIso())}`, [
       { label: 'Insured Person', width: 1.2 }, { label: 'Type', width: .7 }, { label: 'Insurance Company', width: 1.3 }, { label: 'Policy Number', width: 1.15 }, { label: 'Sum Insured', width: 1 }, { label: 'Maturity Date', width: .95 }, { label: 'Yearly Premium', width: 1 }
     ], insurancePolicies.map(policy => [policy.insuredPerson, policy.type, policy.company, policy.policyNumber, money(policy.sumInsured), formatDate(policy.toDate), money(policy.premium)])),
