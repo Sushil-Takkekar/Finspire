@@ -154,6 +154,104 @@ function render() {
   const types = [...new Set(holdings.map(item => item.type))]; renderAllocation(totalValue, types); renderBars(); $('#last-saved').textContent = holdings.length ? `UPDATED ${new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }).toUpperCase()}` : 'NO INVESTMENTS YET';
 }
 function escapeHtml(value) { const el = document.createElement('span'); el.textContent = value; return el.innerHTML; }
+function pdfAscii(value) {
+  return String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/₹/g, 'Rs ').replace(/[–—]/g, '-').replace(/[’‘]/g, "'").replace(/[“”]/g, '"').replace(/[^\x20-\x7E]/g, '');
+}
+function pdfEscape(value) { return pdfAscii(value).replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)'); }
+function pdfWrap(value, maxChars) {
+  const words = pdfAscii(value).split(/\s+/); const lines = []; let line = '';
+  for (const word of words) {
+    if (!word) continue;
+    if (word.length > maxChars) {
+      if (line) { lines.push(line); line = ''; }
+      for (let i = 0; i < word.length; i += maxChars) lines.push(word.slice(i, i + maxChars));
+      continue;
+    }
+    if ((line ? line.length + 1 : 0) + word.length > maxChars) { lines.push(line); line = word; }
+    else line += `${line ? ' ' : ''}${word}`;
+  }
+  if (line || !lines.length) lines.push(line);
+  return lines;
+}
+function makePdfPage(title, subtitle, columns, rows) {
+  const pageWidth = 792, pageHeight = 612, left = 36, right = 36, tableWidth = pageWidth - left - right;
+  const widths = columns.map(column => column.width * tableWidth / columns.reduce((sum, item) => sum + item.width, 0));
+  const commands = ['0.12 0.20 0.15 rg', `BT /F1 20 Tf ${left} ${pageHeight - 42} Td (${pdfEscape(title)}) Tj ET`, '0.38 0.42 0.37 rg', `BT /F1 9 Tf ${left} ${pageHeight - 60} Td (${pdfEscape(subtitle)}) Tj ET`];
+  let y = pageHeight - 86, pageIndex = 1; const pageStreams = [];
+  const drawTableHeader = () => {
+    commands.push('0.91 0.94 0.88 rg', `${left} ${y - 20} ${tableWidth} 24 re f`, '0.16 0.22 0.17 rg');
+    let x = left;
+    columns.forEach((column, index) => { commands.push(`BT /F2 7 Tf ${x + 5} ${y - 11} Td (${pdfEscape(column.label.toUpperCase())}) Tj ET`); x += widths[index]; });
+    x = left;
+    widths.slice(0, -1).forEach(width => { x += width; commands.push(`0.82 0.86 0.80 RG 0.5 w ${x} ${y - 20} m ${x} ${y + 4} l S`); });
+    y -= 28;
+  };
+  drawTableHeader();
+  rows.forEach((row, rowIndex) => {
+    const cells = columns.map((column, index) => pdfWrap(row[index], Math.max(8, Math.floor((widths[index] - 10) / 4.2))));
+    const lineCount = Math.max(...cells.map(lines => lines.length)); const rowHeight = Math.max(23, lineCount * 10 + 10);
+    if (y - rowHeight < 42) {
+      commands.push('0.38 0.42 0.37 rg', `BT /F1 7 Tf ${pageWidth - 92} 22 Td (Page ${pageIndex}) Tj ET`);
+      pageStreams.push(commands.join('\n')); commands.length = 0;
+      pageIndex++; y = pageHeight - 54;
+      commands.push('0.12 0.20 0.15 rg', `BT /F2 10 Tf ${left} ${y} Td (${pdfEscape(title)} - continued) Tj ET`); y -= 22; drawTableHeader();
+    }
+    if (rowIndex % 2 === 1) commands.push('0.97 0.98 0.96 rg', `${left} ${y - rowHeight + 4} ${tableWidth} ${rowHeight} re f`);
+    commands.push('0.88 0.90 0.86 RG 0.5 w', `${left} ${y - rowHeight + 4} m ${left + tableWidth} ${y - rowHeight + 4} l S`, '0.18 0.21 0.18 rg');
+    let x = left;
+    cells.forEach((lines, colIndex) => {
+      lines.forEach((line, lineIndex) => commands.push(`BT /F1 8 Tf ${x + 5} ${y - 10 - lineIndex * 10} Td (${pdfEscape(line)}) Tj ET`));
+      if (colIndex < cells.length - 1) commands.push(`0.91 0.92 0.90 RG 0.4 w ${x + widths[colIndex]} ${y - rowHeight + 4} m ${x + widths[colIndex]} ${y + 4} l S`);
+      x += widths[colIndex];
+    });
+    y -= rowHeight;
+  });
+  if (!rows.length) {
+    commands.push('0.42 0.45 0.41 rg', `BT /F1 9 Tf ${left + 5} ${y - 9} Td (No ${pdfEscape(title.toLowerCase())} recorded.) Tj ET`);
+    y -= 24;
+  }
+  commands.push('0.38 0.42 0.37 rg', `BT /F1 7 Tf ${pageWidth - 92} 22 Td (Page ${pageIndex}) Tj ET`);
+  pageStreams.push(commands.join('\n'));
+  return pageStreams;
+}
+function downloadPortfolioPdf() {
+  const confirmed = window.confirm('Download a PDF containing your Investments, Insurance, and Loans details?');
+  if (!confirmed) return;
+  const formatDate = value => value ? dateLabel(value) : '';
+  const pages = [
+    ...makePdfPage('Investments', `Finspire portfolio - generated ${dateLabel(todayIso())}`, [
+      { label: 'Asset Name', width: 2.1 }, { label: 'Account Number', width: 1.2 }, { label: 'Maturity Date', width: 1.2 }
+    ], holdings.map(item => [item.name || ASSETS[item.type]?.label || item.type, item.accountNumber || '', formatDate(investmentMaturityDate(item))])),
+    ...makePdfPage('Insurance', `Finspire portfolio - generated ${dateLabel(todayIso())}`, [
+      { label: 'Insured Person', width: 1.2 }, { label: 'Type', width: .7 }, { label: 'Insurance Company', width: 1.3 }, { label: 'Policy Number', width: 1.15 }, { label: 'Sum Insured', width: 1 }, { label: 'Maturity Date', width: .95 }, { label: 'Yearly Premium', width: 1 }
+    ], insurancePolicies.map(policy => [policy.insuredPerson, policy.type, policy.company, policy.policyNumber, money(policy.sumInsured), formatDate(policy.toDate), money(policy.premium)])),
+    ...makePdfPage('Loans', `Finspire portfolio - generated ${dateLabel(todayIso())}`, [
+      { label: 'Loan Type', width: 1 }, { label: 'Underlying Asset', width: 1.35 }, { label: 'Outstanding Principal', width: 1.4 }, { label: 'Interest Rate', width: .9 }, { label: 'Monthly EMI', width: 1 }, { label: 'EMI Date', width: 1 }
+    ], loans.map(loan => [loan.loanType, loan.underlyingAsset, money(loan.outstandingPrincipal), `${Number(loan.interestRate).toLocaleString('en-IN', { maximumFractionDigits: 3 })}%`, money(loan.monthlyEmi), formatDate(loan.emiStartDate)]))
+  ];
+  const objects = [];
+  const addObject = value => { objects.push(value); return objects.length; };
+  const catalogId = addObject(''); const pagesId = addObject('');
+  const regularFontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const boldFontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
+  const pageIds = [];
+  pages.forEach(content => {
+    const streamId = addObject(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 ${regularFontId} 0 R /F2 ${boldFontId} 0 R >> >> /Contents ${streamId} 0 R >>`);
+    pageIds.push(pageId);
+  });
+  objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`;
+  let pdf = '%PDF-1.4\n%Finspire\n'; const offsets = [0];
+  objects.forEach((object, index) => { offsets.push(pdf.length); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xrefOffset = pdf.length; pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach(offset => { pdf += `${String(offset).padStart(10, '0')} 00000 n \n`; });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  const blob = new Blob([pdf], { type: 'application/pdf' }); const url = URL.createObjectURL(blob); const link = document.createElement('a');
+  link.href = url; link.download = `finspire-portfolio-${todayIso()}.pdf`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+$$('.export-pdf').forEach(button => button.addEventListener('click', downloadPortfolioPdf));
+
 function updateMaturityNotifications() {
   const utcDay = value => {
     const [year, month, day] = String(value || '').split('-').map(Number);
@@ -326,7 +424,7 @@ function showView(view, scrollTarget = '') {
 $$('.nav-link').forEach(link => link.addEventListener('click', e => { e.preventDefault(); showView(link.dataset.view, link.dataset.scroll || ''); }));
 
 async function refreshInsurance() {
-  try { insurancePolicies = (await api('/api/insurance')).policies; renderInsurance(); }
+  try { insurancePolicies = (await api('/api/insurance')).policies.map(policy => policy.type === 'Car' ? { ...policy, type: 'Vehicle' } : policy); renderInsurance(); }
   catch (error) { if (error.message === 'Please sign in.') openAuth(); else showToast(error.message); }
 }
 function dateLabel(value) {
@@ -401,7 +499,7 @@ function renderInsurance() {
   $('#count-insurance').textContent = `${insurancePolicies.length} ${insurancePolicies.length === 1 ? 'policy' : 'policies'}`;
   $('#policy-count').textContent = insurancePolicies.length;
   $('#insurance-empty').classList.toggle('show', insurancePolicies.length === 0);
-  $('#insurance-body').innerHTML = insurancePolicies.map(policy => `<tr><td><strong>${escapeHtml(policy.insuredPerson)}</strong></td><td><span class="type-pill">${escapeHtml(policy.type)}</span></td><td>${escapeHtml(policy.company)}</td><td>${escapeHtml(policy.policyNumber)}</td><td>${money(policy.sumInsured)}</td><td>${dateLabel(policy.fromDate)} – ${dateLabel(policy.toDate)}</td><td>${renderPolicyMaturity(policy)}</td><td>${money(policy.premium)}</td><td>${policy.documentName ? `<a class="policy-document-link" href="/api/insurance/document?policyId=${encodeURIComponent(policy.id)}" target="_blank" rel="noopener" aria-label="View PDF for ${escapeHtml(policy.insuredPerson)}" title="View ${escapeHtml(policy.documentName)}">View PDF</a>` : '<span class="muted-value">—</span>'}</td><td><div class="row-actions"><button class="row-edit" data-policy-edit="${escapeHtml(policy.id)}" aria-label="Edit policy for ${escapeHtml(policy.insuredPerson)}" title="Edit">✎</button><button class="row-delete" data-policy-delete="${escapeHtml(policy.id)}" aria-label="Remove policy for ${escapeHtml(policy.insuredPerson)}" title="Remove">×</button></div></td></tr>`).join('');
+  $('#insurance-body').innerHTML = insurancePolicies.map(policy => `<tr><td><strong>${escapeHtml(policy.insuredPerson)}</strong></td><td><span class="type-pill">${escapeHtml(policy.type)}</span></td><td>${escapeHtml(policy.company)}</td><td>${escapeHtml(policy.policyNumber)}</td><td>${money(policy.sumInsured)}</td><td>${dateLabel(policy.toDate)}</td><td>${renderPolicyMaturity(policy)}</td><td>${money(policy.premium)}</td><td>${policy.documentName ? `<a class="policy-document-link" href="/api/insurance/document?policyId=${encodeURIComponent(policy.id)}" target="_blank" rel="noopener" aria-label="View PDF for ${escapeHtml(policy.insuredPerson)}" title="View ${escapeHtml(policy.documentName)}">View PDF</a>` : '<span class="muted-value">—</span>'}</td><td><div class="row-actions"><button class="row-edit" data-policy-edit="${escapeHtml(policy.id)}" aria-label="Edit policy for ${escapeHtml(policy.insuredPerson)}" title="Edit">✎</button><button class="row-delete" data-policy-delete="${escapeHtml(policy.id)}" aria-label="Remove policy for ${escapeHtml(policy.insuredPerson)}" title="Remove">×</button></div></td></tr>`).join('');
   updateMaturityNotifications();
 }
 function openInsuranceModal(policy = null) {
@@ -412,7 +510,7 @@ function openInsuranceModal(policy = null) {
   $('#policy-document-current').hidden = true;
   $('#policy-document-current').removeAttribute('href');
   if (policy) {
-    $('#policy-insured').value = policy.insuredPerson; $('#policy-type').value = policy.type; $('#policy-company').value = policy.company;
+    $('#policy-insured').value = policy.insuredPerson; $('#policy-type').value = policy.type === 'Car' ? 'Vehicle' : policy.type; $('#policy-company').value = policy.company;
     $('#policy-number').value = policy.policyNumber; $('#policy-sum').value = policy.sumInsured; $('#policy-premium').value = policy.premium;
     $('#policy-from').value = policy.fromDate; $('#policy-to').value = policy.toDate;
     if (policy.documentName) {
@@ -447,7 +545,7 @@ $('#insurance-form').addEventListener('submit', async e => {
   if (documentFile && documentFile.size > 10 * 1024 * 1024) { $('#insurance-error').textContent = 'Policy PDFs must be 10 MB or smaller.'; return; }
   const policy = { id: editingPolicyId || crypto.randomUUID(), insuredPerson: $('#policy-insured').value.trim(), type: $('#policy-type').value, company: $('#policy-company').value.trim(), policyNumber: $('#policy-number').value.trim(), sumInsured: number($('#policy-sum').value), fromDate, toDate, premium: number($('#policy-premium').value) };
   const before = insurancePolicies, wasEditing = Boolean(editingPolicyId);
-  insurancePolicies = editingPolicyId ? insurancePolicies.map(item => item.id === editingPolicyId ? policy : item) : [...insurancePolicies, policy];
+  insurancePolicies = (editingPolicyId ? insurancePolicies.map(item => item.id === editingPolicyId ? policy : item) : [...insurancePolicies, policy]).map(item => item.type === 'Car' ? { ...item, type: 'Vehicle' } : item);
   const saveButton = $('#insurance-save'); saveButton.disabled = true;
   try {
     insurancePolicies = (await api('/api/insurance', { method: 'PUT', body: JSON.stringify({ policies: insurancePolicies }) })).policies;
