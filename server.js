@@ -80,9 +80,17 @@ async function createUser(user) {
   await supabaseRequest('user_data', '', { method: 'POST', body: { user_id: user.id } });
 }
 async function getUserCollection(userId, collection) {
-  if (!useSupabase) return readDb()[collection]?.[userId] || [];
-  const rows = await supabaseRequest('user_data', `?select=${collection}&user_id=eq.${encodeURIComponent(userId)}&limit=1`);
-  return rows[0]?.[collection] || [];
+  let value;
+  if (!useSupabase) value = readDb()[collection]?.[userId] || [];
+  else {
+    const rows = await supabaseRequest('user_data', `?select=${collection}&user_id=eq.${encodeURIComponent(userId)}&limit=1`);
+    value = rows[0]?.[collection] || [];
+  }
+  if (collection === 'insurance' && Array.isArray(value) && value.some(policy => policy?.type === 'Car')) {
+    value = value.map(policy => policy?.type === 'Car' ? { ...policy, type: 'Vehicle' } : policy);
+    await setUserCollection(userId, collection, value);
+  }
+  return value;
 }
 async function setUserCollection(userId, collection, value) {
   if (!useSupabase) { const db = readDb(); db[collection][userId] = value; writeDb(db); return; }
@@ -314,18 +322,19 @@ async function route(req, res) {
     if (method === 'PUT' && url.pathname === '/api/insurance') {
       const body = await readBody(req);
       if (!Array.isArray(body.policies) || body.policies.length > 500) return send(res, 400, { error: 'Invalid insurance policy list.' });
-      const kinds = ['Health', 'Term', 'Car', 'House', 'Other'];
+      const kinds = ['Health', 'Term', 'Vehicle', 'House', 'Other'];
       const previous = await getUserCollection(user.id, 'insurance');
       const previousById = new Map(previous.map(policy => [policy.id, policy]));
       const clean = body.policies.map(policy => {
-        if (!policy || typeof policy.insuredPerson !== 'string' || typeof policy.company !== 'string' || typeof policy.policyNumber !== 'string' || !kinds.includes(policy.type)) throw new Error('Complete all insurance policy details.');
+        const type = policy?.type === 'Car' ? 'Vehicle' : policy?.type;
+        if (!policy || typeof policy.insuredPerson !== 'string' || typeof policy.company !== 'string' || typeof policy.policyNumber !== 'string' || !kinds.includes(type)) throw new Error('Complete all insurance policy details.');
         const sumInsured = Number(policy.sumInsured), premium = Number(policy.premium);
         const fromDate = String(policy.fromDate || ''), toDate = String(policy.toDate || '');
         if (!Number.isFinite(sumInsured) || sumInsured <= 0 || !Number.isFinite(premium) || premium <= 0) throw new Error('Sum insured and premium must be positive amounts.');
         if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || toDate < fromDate) throw new Error('Enter a valid policy period.');
         const id = String(policy.id || crypto.randomUUID());
         if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('Invalid insurance policy identifier.');
-        return { id, insuredPerson: policy.insuredPerson.trim().slice(0, 100), type: policy.type, company: policy.company.trim().slice(0, 100), policyNumber: policy.policyNumber.trim().slice(0, 100), sumInsured, fromDate, toDate, premium, ...(previousById.get(id)?.documentName ? { documentName: previousById.get(id).documentName } : {}) };
+        return { id, insuredPerson: policy.insuredPerson.trim().slice(0, 100), type, company: policy.company.trim().slice(0, 100), policyNumber: policy.policyNumber.trim().slice(0, 100), sumInsured, fromDate, toDate, premium, ...(previousById.get(id)?.documentName ? { documentName: previousById.get(id).documentName } : {}) };
       });
       await setUserCollection(user.id, 'insurance', clean);
       if (useSupabase) {
