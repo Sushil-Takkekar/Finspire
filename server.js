@@ -10,18 +10,27 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const DEFAULT_LEGACY_EMAIL = 'sushycom@gmail.com';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const EMAIL_FROM = process.env.EMAIL_FROM || '';
+const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || (process.env.NODE_ENV === 'production' ? 'https://finspire-eq08.onrender.com' : `http://localhost:${PORT}`)).replace(/\/$/, '');
 const INSURANCE_BUCKET = 'insurance-policies';
 const MAX_POLICY_PDF_BYTES = 10 * 1024 * 1024;
 const useSupabase = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 if (process.env.NODE_ENV === 'production' && !useSupabase) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for production.');
 const sessions = new Map();
 const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY;
+const RESET_TOKEN_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY || crypto.randomBytes(32).toString('hex');
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
+const passwordResetAttempts = new Map();
 
 function readDb() {
   try {
     const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
     db.users ||= []; db.portfolios ||= {}; db.insurance ||= {}; db.loans ||= {};
+    let migratedEmails = false;
+    for (const user of db.users) if (!user.email) { user.email = DEFAULT_LEGACY_EMAIL; migratedEmails = true; }
+    if (migratedEmails) writeDb(db);
     return db;
   } catch { return { users: [], portfolios: {}, insurance: {}, loans: {} }; }
 }
@@ -66,13 +75,46 @@ async function storageRequest(endpoint, options = {}) {
 }
 async function findUserByUsername(username) {
   if (!useSupabase) return readDb().users.find(item => item.username === username) || null;
-  const rows = await supabaseRequest('users', `?select=id,username,salt,hash&username=eq.${encodeURIComponent(username)}&limit=1`);
-  return rows[0] || null;
+  const rows = await supabaseRequest('users', `?select=id,username,salt,hash,email&username=eq.${encodeURIComponent(username)}&limit=1`);
+  return ensureLegacyEmail(rows[0] || null);
+}
+async function findUserByEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (!useSupabase) return readDb().users.find(item => String(item.email || '').trim().toLowerCase() === normalized) || null;
+  const rows = await supabaseRequest('users', `?select=id,username,salt,hash,email&email=ilike.${encodeURIComponent(normalized)}&limit=1`);
+  return ensureLegacyEmail(rows[0] || null);
+}
+async function findUsersByEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return [];
+  if (!useSupabase) return readDb().users.filter(item => String(item.email || '').trim().toLowerCase() === normalized);
+  const rows = await supabaseRequest('users', `?select=id,username,salt,hash,email&email=ilike.${encodeURIComponent(normalized)}`);
+  return Promise.all(rows.map(ensureLegacyEmail));
+}
+async function findUserByIdentifier(identifier) {
+  const normalized = String(identifier || '').trim().toLowerCase();
+  if (!normalized) return null;
+  return normalized.includes('@') ? findUserByEmail(normalized) : findUserByUsername(normalized);
 }
 async function findUserById(id) {
   if (!useSupabase) return readDb().users.find(item => item.id === id) || null;
-  const rows = await supabaseRequest('users', `?select=id,username,salt,hash&id=eq.${encodeURIComponent(id)}&limit=1`);
-  return rows[0] || null;
+  const rows = await supabaseRequest('users', `?select=id,username,salt,hash,email&id=eq.${encodeURIComponent(id)}&limit=1`);
+  return ensureLegacyEmail(rows[0] || null);
+}
+async function ensureLegacyEmail(user) {
+  if (!user || user.email) return user;
+  user.email = DEFAULT_LEGACY_EMAIL;
+  await supabaseRequest('users', `?id=eq.${encodeURIComponent(user.id)}`, { method: 'PATCH', body: { email: user.email } });
+  return user;
+}
+async function saveUserCredentials(user) {
+  if (!useSupabase) {
+    const db = readDb(), index = db.users.findIndex(item => item.id === user.id);
+    if (index < 0) throw new Error('Account not found.');
+    db.users[index] = { ...db.users[index], ...user }; writeDb(db); return;
+  }
+  await supabaseRequest('users', `?id=eq.${encodeURIComponent(user.id)}`, { method: 'PATCH', body: { salt: user.salt, hash: user.hash } });
 }
 async function createUser(user) {
   if (!useSupabase) { const db = readDb(); db.users.push(user); db.portfolios[user.id] = []; writeDb(db); return; }
@@ -145,6 +187,49 @@ async function currentUser(req) {
 }
 const hashPassword = (password, salt = crypto.randomBytes(16).toString('hex')) => ({ salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') });
 function safeUser(user) { return { id: user.id, username: user.username }; }
+function validEmail(value) { return typeof value === 'string' && value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()); }
+function createPasswordResetToken(user) {
+  const payload = Buffer.from(JSON.stringify({ userId: user.id, expiresAt: Date.now() + 15 * 60 * 1000 })).toString('base64url');
+  const userKey = crypto.createHmac('sha256', RESET_TOKEN_SECRET).update(user.hash).digest();
+  const signature = crypto.createHmac('sha256', userKey).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+function verifyPasswordResetToken(token, user) {
+  if (typeof token !== 'string' || token.length > 2048) return false;
+  const [payload, signature, extra] = token.split('.');
+  if (!payload || !signature || extra) return false;
+  let data;
+  try { data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')); } catch { return false; }
+  if (data.userId !== user.id || !Number.isFinite(data.expiresAt) || data.expiresAt <= Date.now()) return false;
+  const userKey = crypto.createHmac('sha256', RESET_TOKEN_SECRET).update(user.hash).digest();
+  const expected = Buffer.from(crypto.createHmac('sha256', userKey).update(payload).digest('base64url'));
+  const received = Buffer.from(signature);
+  return expected.length === received.length && crypto.timingSafeEqual(expected, received);
+}
+async function sendPasswordResetEmail(email, resetUrl) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) {
+    console.info(`Local Finspire password reset link: ${resetUrl}`);
+    return;
+  }
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: EMAIL_FROM, to: [email], subject: 'Reset your Finspire password',
+      text: `Use this one-time link to reset your Finspire password. It expires in 15 minutes:\n\n${resetUrl}\n\nIf you did not request this, you can ignore this email.`,
+      html: `<p>Use this one-time link to reset your Finspire password. It expires in 15 minutes:</p><p><a href="${resetUrl}">Reset your password</a></p><p>If you did not request this, you can ignore this email.</p>`
+    }), signal: AbortSignal.timeout(10000)
+  });
+  if (!response.ok) throw new Error(`Reset email delivery failed (${response.status}).`);
+}
+function allowPasswordResetRequest(req, username) {
+  const now = Date.now(), forwardedAddress = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(), address = forwardedAddress || req.socket.remoteAddress || 'unknown', key = `${address}:${username}`, windowMs = 60 * 60 * 1000;
+  if (passwordResetAttempts.size > 1000) for (const [entry, value] of passwordResetAttempts) if (now - value.startedAt >= windowMs) passwordResetAttempts.delete(entry);
+  const current = passwordResetAttempts.get(key);
+  if (!current || now - current.startedAt >= windowMs) { passwordResetAttempts.set(key, { startedAt: now, count: 1 }); return true; }
+  if (current.count >= 5) return false;
+  current.count++; return true;
+}
 function sessionCookie(token, maxAge = '') {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
   return `session=${token}; HttpOnly; SameSite=Lax; Path=/${secure}${maxAge}`;
@@ -205,25 +290,58 @@ async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const method = req.method;
   if (method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
+  if (method === 'POST' && url.pathname === '/api/password-reset/request') {
+    if (process.env.NODE_ENV === 'production' && (!RESEND_API_KEY || !EMAIL_FROM)) return send(res, 503, { error: 'Password reset email delivery is not configured yet.' });
+    const body = await readBody(req), email = String(body.email || '').trim().toLowerCase();
+    if (!allowPasswordResetRequest(req, email.slice(0, 254))) return send(res, 429, { error: 'Too many reset requests. Try again later.' });
+    const account = validEmail(email) ? await findUserByEmail(email) : null;
+    if (account) {
+      const resetToken = createPasswordResetToken(account), resetUrl = new URL('/', PUBLIC_APP_URL);
+      resetUrl.searchParams.set('reset', resetToken);
+      setImmediate(() => sendPasswordResetEmail(account.email, resetUrl.toString()).catch(error => console.error('Password reset email could not be delivered:', error.message)));
+    }
+    return send(res, 200, { ok: true, localDelivery: process.env.NODE_ENV !== 'production' && (!RESEND_API_KEY || !EMAIL_FROM) });
+  }
+  if (method === 'POST' && url.pathname === '/api/password-reset/complete') {
+    const body = await readBody(req, 5000), token = String(body.token || ''), password = String(body.password || '');
+    if (password.length < 8 || password.length > 200) return send(res, 400, { error: 'Password must be at least 8 characters.' });
+    const tokenParts = token.split('.');
+    let tokenPayload;
+    try { tokenPayload = JSON.parse(Buffer.from(tokenParts[0] || '', 'base64url').toString('utf8')); } catch { tokenPayload = null; }
+    if (!tokenPayload?.userId) return send(res, 400, { error: 'This password reset link is invalid or has expired. Request a new one.' });
+    const account = await findUserById(String(tokenPayload.userId));
+    if (!account || !verifyPasswordResetToken(token, account)) return send(res, 400, { error: 'This password reset link is invalid or has expired. Request a new one.' });
+    const credentials = hashPassword(password);
+    await saveUserCredentials({ id: account.id, ...credentials });
+    for (const [sessionToken, session] of sessions) if (session.userId === account.id) sessions.delete(sessionToken);
+    return send(res, 200, { ok: true });
+  }
   if (method === 'POST' && url.pathname === '/api/register') {
     const body = await readBody(req);
     const username = String(body.username || '').trim().toLowerCase();
+    const email = String(body.email || '').trim().toLowerCase();
     const password = String(body.password || '');
     if (!/^[a-z0-9_.-]{3,32}$/.test(username)) return send(res, 400, { error: 'Username must be 3–32 characters (letters, numbers, dot, underscore or dash).' });
+    if (!validEmail(email)) return send(res, 400, { error: 'Enter a valid email address.' });
     if (password.length < 8 || password.length > 200) return send(res, 400, { error: 'Password must be at least 8 characters.' });
     if (await findUserByUsername(username)) return send(res, 409, { error: 'That username is already registered.' });
     const creds = hashPassword(password);
-    const user = { id: crypto.randomUUID(), username, ...creds };
+    const user = { id: crypto.randomUUID(), username, email, ...creds };
     await createUser(user);
     const token = createSessionToken(user.id);
     return send(res, 201, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token, `; Max-Age=${SESSION_MAX_AGE}`) });
   }
   if (method === 'POST' && url.pathname === '/api/login') {
-    const body = await readBody(req), username = String(body.username || '').trim().toLowerCase(), password = String(body.password || '');
-    const user = await findUserByUsername(username);
+    const body = await readBody(req), identifier = String(body.identifier || body.username || '').trim().toLowerCase(), password = String(body.password || '');
+    const candidates = identifier.includes('@') ? await findUsersByEmail(identifier) : [await findUserByUsername(identifier)].filter(Boolean);
+    let user = null;
+    for (const candidate of candidates) {
+      if (!candidate?.salt || !candidate?.hash) continue;
+      const check = crypto.scryptSync(password, candidate.salt, 64);
+      const expected = Buffer.from(candidate.hash, 'hex');
+      if (check.length === expected.length && crypto.timingSafeEqual(check, expected)) { user = candidate; break; }
+    }
     if (!user) return send(res, 401, { error: 'Incorrect username or password.' });
-    const check = crypto.scryptSync(password, user.salt, 64);
-    if (!crypto.timingSafeEqual(check, Buffer.from(user.hash, 'hex'))) return send(res, 401, { error: 'Incorrect username or password.' });
     const token = createSessionToken(user.id);
     return send(res, 200, { user: safeUser(user) }, { 'Set-Cookie': sessionCookie(token, `; Max-Age=${SESSION_MAX_AGE}`) });
   }
@@ -367,7 +485,8 @@ async function route(req, res) {
         }
         if (item.type === 'epf') {
           const salaryDate = String(allowed.salaryDate || ''), employeeContribution = Number(allowed.employeeContribution), employerContribution = Number(allowed.employerContribution), balance = Number(allowed.balance);
-          if (!Number.isFinite(balance) || balance < 0 || !Number.isFinite(employeeContribution) || employeeContribution < 0 || !Number.isFinite(employerContribution) || employerContribution < 0 || employeeContribution + employerContribution <= 0 || !isoDateToUtc(salaryDate) || isoUtcDate(isoDateToUtc(salaryDate)) !== salaryDate) throw new Error('Enter a valid EPF balance, monthly contributions, and next salary date.');
+          const hasMonthlyContribution = employeeContribution + employerContribution > 0 || Boolean(salaryDate);
+          if (!Number.isFinite(balance) || balance < 0 || !Number.isFinite(employeeContribution) || employeeContribution < 0 || !Number.isFinite(employerContribution) || employerContribution < 0 || (hasMonthlyContribution && (employeeContribution + employerContribution <= 0 || !isoDateToUtc(salaryDate) || isoUtcDate(isoDateToUtc(salaryDate)) !== salaryDate))) throw new Error('Enter a valid EPF balance, monthly contributions, and next salary date.');
           allowed.balance = balance;
           allowed.employeeContribution = employeeContribution;
           allowed.employerContribution = employerContribution;

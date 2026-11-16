@@ -4,6 +4,7 @@ const path = require('node:path');
 const baseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const file = path.join(__dirname, '..', 'data', 'db.json');
+const DEFAULT_LEGACY_EMAIL = 'sushycom@gmail.com';
 
 if (!baseUrl || !serviceKey) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY before importing.');
 if (!fs.existsSync(file)) throw new Error('Local data/db.json was not found.');
@@ -34,7 +35,7 @@ async function main() {
     loans: db.loans?.[user.id] || []
   }));
   if (users.length) {
-    await request('users', users.map(({ id, username, salt, hash }) => ({ id, username, salt, hash })));
+    await request('users', users.map(({ id, username, email, salt, hash }) => ({ id, username, email: email || DEFAULT_LEGACY_EMAIL, salt, hash })));
     await request('user_data', userData, 'user_id');
   }
   console.log(`Imported ${users.length} account(s) and their Finspire records.`);

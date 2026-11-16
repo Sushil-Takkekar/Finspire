@@ -270,6 +270,9 @@
 .export-icon-button:hover, .export-icon-button:focus-visible { background: #b9de6ac9; }
 .export-icon-button::after { content: attr(data-tooltip); position: absolute; z-index: 9; right: 0; top: calc(100% + 8px); padding: 7px 9px; border-radius: 5px; background: #263e2d; color: #fff; font: 10px var(--font); white-space: nowrap; box-shadow: 0 4px 12px #18251c25; opacity: 0; visibility: hidden; transform: translateY(-2px); transition: opacity .14s ease, transform .14s ease, visibility .14s; pointer-events: none; }
 .export-icon-button:hover::after, .export-icon-button:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
+.auth-forgot-link { display:block; margin:-7px 0 12px auto; padding:2px 0; border:0; background:none; color:#49683d; font-size:11px; font-weight:600; }
+.auth-forgot-link:hover { text-decoration:underline; }
+.form-error.success { color:#527b39; }
 
 #refresh-navs .refresh-label,
 #refresh-loans .refresh-label {
@@ -336,6 +339,7 @@
 .policy-document-current:hover, .policy-document-link:hover { text-decoration: underline; }
 @keyframes notification-blink { 50% { opacity: .3; } }
 
-.auth-card form #confirm-password-label[hidden] {
+.auth-card form label[hidden],
+.auth-card form button[hidden] {
   display: none;
 }

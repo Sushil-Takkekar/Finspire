@@ -12,7 +12,7 @@ const ASSETS = {
   rd: { label: 'Recurring deposit', short: 'Recurring deposit', icon: '◷', color: '#c48679' },
   epf: { label: 'EPF', short: 'EPF', icon: '◩', color: '#5e9aaa' }
 };
-let user = null, holdings = [], insurancePolicies = [], loans = [], collapsedLoans = new Set(), activeType = 'stock', authMode = 'login', filterType = 'all', editingId = null, editingPolicyId = null, editingLoanId = null;
+let user = null, holdings = [], insurancePolicies = [], loans = [], collapsedLoans = new Set(), activeType = 'stock', authMode = 'login', passwordResetToken = '', filterType = 'all', editingId = null, editingPolicyId = null, editingLoanId = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) } });
@@ -32,11 +32,63 @@ function setDashboardValuesVisible(visible) {
   button.setAttribute('aria-label', label); button.title = label;
 }
 $('#toggle-dashboard-values').addEventListener('click', () => setDashboardValuesVisible(!dashboardValuesVisible));
-function setAuth(mode) { authMode = mode; $('#auth-title').textContent = mode === 'login' ? 'Welcome back.' : 'Start building wealth.'; $('#auth-subtitle').textContent = mode === 'login' ? 'Sign in to your private investment dashboard.' : 'Create a local account for your portfolio.'; $('#auth-submit').innerHTML = mode === 'login' ? 'Sign in <span>→</span>' : 'Create account <span>→</span>'; $('#auth-toggle').innerHTML = mode === 'login' ? 'New here? <button type="button">Create an account</button>' : 'Already have an account? <button type="button">Sign in</button>'; $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; const confirmLabel = $('#confirm-password-label'), confirmPassword = $('#auth-confirm-password'); confirmLabel.hidden = mode === 'login'; confirmPassword.required = mode === 'register'; confirmPassword.value = ''; $('#auth-error').textContent = ''; }
+function setAuth(mode) {
+  authMode = mode;
+  const copy = {
+    login: ['Welcome back.', 'Sign in to your private investment dashboard.', 'Sign in'],
+    register: ['Start building wealth.', 'Create a private Finspire account.', 'Create account'],
+    forgot: ['Reset your password.', 'Enter your account email and we’ll send a reset link if it matches.', 'Send reset link'],
+    reset: ['Choose a new password.', 'Set a new password for your Finspire account.', 'Update password']
+  }[mode];
+  $('#auth-title').textContent = copy[0]; $('#auth-subtitle').textContent = copy[1]; $('#auth-submit').innerHTML = `${copy[2]} <span>→</span>`;
+  const usernameLabel = $('#auth-username-label'), emailLabel = $('#auth-email-label'), passwordLabel = $('#auth-password-label'), confirmLabel = $('#confirm-password-label');
+  usernameLabel.hidden = ['forgot', 'reset'].includes(mode); $('#auth-username').required = ['login', 'register'].includes(mode);
+  usernameLabel.childNodes[0].textContent = mode === 'login' ? 'Username or email' : 'Username';
+  $('#auth-username').placeholder = mode === 'login' ? 'Username or email address' : 'e.g. alex.smith';
+  emailLabel.hidden = !['register', 'forgot'].includes(mode); $('#auth-email').required = ['register', 'forgot'].includes(mode);
+  // Keep only the account email on recovery; login uses the identifier field.
+  if (mode === 'login') $('#auth-email').required = false;
+  passwordLabel.hidden = mode === 'forgot'; $('#auth-password').required = ['login', 'register', 'reset'].includes(mode);
+  $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  passwordLabel.childNodes[0].textContent = mode === 'reset' ? 'New password' : 'Password';
+  confirmLabel.hidden = !['register', 'reset'].includes(mode); $('#auth-confirm-password').required = ['register', 'reset'].includes(mode); $('#auth-confirm-password').value = '';
+  $('#forgot-password-link').hidden = mode !== 'login';
+  const authToggle = $('#auth-toggle'); authToggle.hidden = mode === 'reset';
+  authToggle.innerHTML = mode === 'register' ? 'Already have an account? <button type="button">Sign in</button>' : mode === 'forgot' ? 'Remembered your password? <button type="button">Sign in</button>' : 'New here? <button type="button">Create an account</button>';
+  $('#auth-error').textContent = ''; $('#auth-error').classList.remove('success');
+}
 function openApp(nextUser) { user = nextUser; setDashboardValuesVisible(false); $('#auth-view').hidden = true; $('#app').hidden = false; $('#profile-name').textContent = user.username; $('#avatar').textContent = user.username.slice(0, 1).toUpperCase(); $('#greeting-date').textContent = new Intl.DateTimeFormat('en-IN', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase(); refreshHoldings(); refreshInsurance(); refreshLoans(); }
 function openAuth() { $('#app').hidden = true; $('#auth-view').hidden = false; }
 $('#auth-toggle').addEventListener('click', e => { if (e.target.tagName === 'BUTTON') setAuth(authMode === 'login' ? 'register' : 'login'); });
-$('#auth-form').addEventListener('submit', async e => { e.preventDefault(); $('#auth-error').textContent = ''; if (authMode === 'register' && $('#auth-password').value !== $('#auth-confirm-password').value) { $('#auth-error').textContent = 'Passwords do not match.'; $('#auth-confirm-password').focus(); return; } const button = $('#auth-submit'); button.disabled = true; try { const result = await api(`/api/${authMode}`, { method: 'POST', body: JSON.stringify({ username: $('#auth-username').value, password: $('#auth-password').value }) }); openApp(result.user); } catch (error) { $('#auth-error').textContent = error.message; } finally { button.disabled = false; } });
+$('#forgot-password-link').addEventListener('click', () => setAuth('forgot'));
+$('#auth-form').addEventListener('submit', async e => {
+  e.preventDefault(); $('#auth-error').textContent = ''; $('#auth-error').classList.remove('success');
+  if (['register', 'reset'].includes(authMode) && $('#auth-password').value !== $('#auth-confirm-password').value) { $('#auth-error').textContent = 'Passwords do not match.'; $('#auth-confirm-password').focus(); return; }
+  const button = $('#auth-submit'); button.disabled = true;
+  try {
+    if (authMode === 'forgot') {
+      const result = await api('/api/password-reset/request', { method: 'POST', body: JSON.stringify({ email: $('#auth-email').value }) });
+      $('#auth-error').textContent = result.localDelivery ? 'If that email matches an account, a reset link has been printed in the local server console.' : 'If that email matches an account, a reset link will be emailed.';
+      $('#auth-error').classList.add('success');
+    } else if (authMode === 'reset') {
+      await api('/api/password-reset/complete', { method: 'POST', body: JSON.stringify({ token: passwordResetToken, password: $('#auth-password').value }) });
+      passwordResetToken = ''; history.replaceState(null, '', location.pathname); setAuth('login');
+      $('#auth-error').textContent = 'Password updated. Please sign in.'; $('#auth-error').classList.add('success');
+    } else {
+      const body = { password: $('#auth-password').value };
+      if (authMode === 'register') {
+        body.username = $('#auth-username').value;
+        body.email = $('#auth-email').value;
+      } else {
+        body.identifier = $('#auth-username').value;
+        // Keep compatibility with a locally running server that still expects `username`.
+        body.username = body.identifier;
+      }
+      const result = await api(`/api/${authMode}`, { method: 'POST', body: JSON.stringify(body) }); openApp(result.user);
+    }
+  } catch (error) { $('#auth-error').textContent = error.message; }
+  finally { button.disabled = false; }
+});
 $('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST', body: '{}' }); } finally { user = null; holdings = []; insurancePolicies = []; loans = []; openAuth(); } });
 function hasMutualFunds() { return holdings.some(item => item.type === 'mf'); }
 function hasEpf() { return holdings.some(item => item.type === 'epf'); }
@@ -120,7 +172,7 @@ function rdInstallments(item) {
 function investedValue(item) { if (item.type === 'stock' || item.type === 'mf') return number(item.invested) > 0 ? number(item.invested) : number(item.units) * number(item.price); if (item.type === 'ppf') return ppfBalance(item); if (item.type === 'fd') return number(item.amount); if (item.type === 'rd') return number(item.monthly) * rdInstallments(item); if (item.type === 'epf') return number(item.balance); return 0; }
 function monthlyContribution(item) {
   const today = todayIso();
-  if (item.type === 'mf' && item.sipEnabled && item.sipStartDate && item.sipStartDate <= today) return number(item.sipAmount);
+  if (item.type === 'mf' && item.sipEnabled) return number(item.sipAmount);
   if (item.type === 'ppf' && item.monthlyEnabled && item.monthlyStartDate && item.monthlyStartDate <= today) return number(item.monthlyAmount);
   if (item.type === 'rd' && item.openDate && item.openDate <= today && rdInstallments(item) < number(item.tenure)) return number(item.monthly);
   if (item.type === 'epf' && item.salaryDate) return number(item.employeeContribution) + number(item.employerContribution);
@@ -328,11 +380,11 @@ function renderBars() {
 
 const fields = {
   stock: `<div class="form-field full-width"><label for="f-name">Stock name / ticker</label><input id="f-name" required placeholder="e.g. Reliance Industries"></div><div class="form-field"><label for="f-units">Units to add</label><input id="f-units" type="number" min="0.000001" step="any" required placeholder="10"></div><div class="form-field"><label for="f-price">Price per share (₹)</label><input id="f-price" type="number" min="0.01" step="any" required placeholder="Enter share price"></div><div class="form-field full-width" id="basis-field" hidden><label for="f-existing-cost">Total invested amount (₹)</label><input id="f-existing-cost" type="number" min="0" step="any" placeholder="Auto from units × price"></div><p class="form-hint full-width">Enter the units in this purchase. Matching stock entries are combined and the invested amount is recalculated using this price.</p>`,
-  mf: `<div class="form-field full-width"><label for="f-code">AMFI scheme code</label><div class="inline-input"><input id="f-code" inputmode="numeric" required placeholder="e.g. 120503"><button type="button" class="btn btn-small" id="fetch-nav">Fetch NAV</button></div><p class="form-hint" id="nav-status">Latest NAV is fetched from mfapi.in when you save.</p></div><div class="form-field full-width"><label for="f-name">Fund name</label><input id="f-name" required placeholder="Fetched from scheme code"></div><div class="form-field"><label for="f-units">Units to add</label><input id="f-units" type="number" min="0.000001" step="any" required placeholder="10"></div><div class="form-field"><label for="f-nav">Latest NAV (₹)</label><input id="f-nav" type="number" min="0.0001" step="any" required placeholder="Fetched automatically"></div><div class="form-field full-width" id="basis-field" hidden><label for="f-existing-cost">Total invested amount (₹)</label><input id="f-existing-cost" type="number" min="0" step="any" placeholder="Auto from units × NAV"></div><label class="sip-toggle full-width"><input id="f-sip-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly SIP</strong><small>Buy units automatically on each scheduled date when you refresh</small></span></label><div class="sip-fields full-width" id="sip-fields" hidden><div class="form-field"><label for="f-sip-amount">SIP amount per month (₹)</label><input id="f-sip-amount" type="number" min="0.01" step="any" placeholder="5000"></div><div class="form-field"><label for="f-sip-start-date">First SIP date</label><input id="f-sip-start-date" type="date"></div><p class="form-hint full-width">On each refresh, the app uses the NAV on the SIP date or the next available NAV date. Processed installments are not added twice.</p></div><p class="form-hint full-width">Enter the units in this purchase. Matching fund entries are combined using the latest NAV.</p>`,
+  mf: `<div class="form-field full-width"><label for="f-code">AMFI scheme code</label><div class="inline-input"><input id="f-code" inputmode="numeric" required placeholder="e.g. 120503"><button type="button" class="btn btn-small" id="fetch-nav">Fetch NAV</button></div><p class="form-hint" id="nav-status">Latest NAV is fetched from mfapi.in when you save.</p></div><div class="form-field full-width"><label for="f-name">Fund name</label><input id="f-name" required placeholder="Fetched from scheme code"></div><div class="form-field"><label for="f-units">Units to add</label><input id="f-units" type="number" min="0.000001" step="any" required placeholder="10"></div><div class="form-field"><label for="f-nav">Latest NAV (₹)</label><input id="f-nav" type="number" min="0.0001" step="any" required placeholder="Fetched automatically"></div><div class="form-field full-width" id="basis-field" hidden><label for="f-existing-cost">Total invested amount (₹)</label><input id="f-existing-cost" type="number" min="0" step="any" placeholder="Auto from units × NAV"></div><label class="sip-toggle full-width"><input id="f-sip-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly SIP</strong><small>Buy units automatically on each scheduled date when you refresh</small></span></label><div class="sip-fields full-width" id="sip-fields" hidden><div class="form-field"><label for="f-sip-amount">SIP amount per month (₹)</label><input id="f-sip-amount" type="number" min="0.01" step="any" placeholder="5000"></div><div class="form-field"><label for="f-sip-start-date">Next SIP Date</label><input id="f-sip-start-date" type="date"></div><p class="form-hint full-width">On each refresh, the app uses the NAV on the SIP date or the next available NAV date. Processed installments are not added twice.</p></div><p class="form-hint full-width">Enter the units in this purchase. Matching fund entries are combined using the latest NAV.</p>`,
   ppf: `<div class="form-field full-width"><label for="f-name">Account label</label><input id="f-name" required value="PPF account" placeholder="e.g. PPF — primary"></div><div class="form-field full-width"><label for="f-contribution">One-time contribution (₹)</label><input id="f-contribution" type="number" min="0.01" step="any" required placeholder="150000"></div><div class="form-field full-width"><label for="f-date">Account open date (for maturity tracking)</label><input id="f-date" type="date"></div><label class="sip-toggle full-width"><input id="f-ppf-monthly-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly investment</strong><small>Add a recurring contribution to this PPF account</small></span></label><div class="sip-fields full-width" id="ppf-monthly-fields" hidden><div class="form-field"><label for="f-ppf-monthly-amount">Monthly amount (₹)</label><input id="f-ppf-monthly-amount" type="number" min="0.01" step="any" placeholder="5000"></div><div class="form-field"><label for="f-ppf-monthly-start-date">Start date</label><input id="f-ppf-monthly-start-date" type="date"></div><p class="form-hint full-width">Monthly contributions are counted from the start date through the latest scheduled date up to today.</p></div><p class="form-hint full-width">The one-time contribution is added to the matching PPF account balance.</p>`,
   fd: `<div class="form-field full-width"><label for="f-name">Deposit label</label><input id="f-name" required placeholder="e.g. HDFC Bank FD"></div><div class="form-field"><label for="f-amount">Principal amount (₹)</label><input id="f-amount" type="number" min="1" step="any" required placeholder="500000"></div><div class="form-field"><label for="f-rate">Annual interest rate (%)</label><input id="f-rate" type="number" min="0.01" step="any" required placeholder="7.25"></div><div class="form-field"><label for="f-tenure">Tenure (months)</label><input id="f-tenure" type="number" min="1" step="1" required placeholder="24"></div><div class="form-field"><label for="f-date">Start date</label><input id="f-date" type="date" value="${todayIso()}" required></div><p class="form-hint full-width">A fixed deposit is a one-time investment. Use Edit to update its details.</p>`,
   rd: `<div class="form-field full-width"><label for="f-name">Deposit label</label><input id="f-name" required placeholder="e.g. SBI Recurring Deposit"></div><div class="form-field"><label for="f-monthly">Monthly deposit (₹)</label><input id="f-monthly" type="number" min="1" step="any" required placeholder="10000"></div><div class="form-field"><label for="f-rate">Annual interest rate (%)</label><input id="f-rate" type="number" min="0" step="any" required placeholder="6.5"></div><div class="form-field"><label for="f-tenure">Tenure (months)</label><input id="f-tenure" type="number" min="1" step="1" required placeholder="36"></div><div class="form-field"><label for="f-date">Open date</label><input id="f-date" type="date" value="${todayIso()}" required></div><p class="form-hint full-width">Use Edit to update this recurring deposit. Invested amount counts installments due from the open date.</p>`,
-  epf: `<div class="form-field full-width"><label for="f-epf-name">Account label</label><input id="f-epf-name" required maxlength="100" placeholder="e.g. EPF — current employer"></div><div class="form-field full-width"><label for="f-epf-balance">Current balance (₹)</label><input id="f-epf-balance" type="number" min="0" step="any" required placeholder="750000"></div><div class="form-field"><label for="f-epf-employee">Employee EPF (12% · ₹/month)</label><input id="f-epf-employee" type="number" min="0" step="any" required placeholder="6000"></div><div class="form-field"><label for="f-epf-employer">Employer EPF (3.67% · ₹/month)</label><input id="f-epf-employer" type="number" min="0" step="any" required placeholder="1835"></div><div class="form-field full-width"><label for="f-epf-salary-date">Next salary date (after current balance)</label><input id="f-epf-salary-date" type="date" required></div><p class="form-hint full-width">Enter the monthly contribution amounts from your payslip. Refresh adds both contributions on each salary date from the date above.</p>`
+  epf: `<div class="form-field full-width"><label for="f-epf-name">Account label</label><input id="f-epf-name" required maxlength="100" placeholder="e.g. EPF — current employer"></div><div class="form-field full-width"><label for="f-epf-balance">Current balance (₹)</label><input id="f-epf-balance" type="number" min="0" step="any" required placeholder="750000"></div><label class="sip-toggle full-width"><input id="f-epf-monthly-enabled" type="checkbox"><span class="toggle-track"><i></i></span><span class="sip-toggle-copy"><strong>Set up a monthly contribution</strong><small>Add employee and employer EPF amounts on each salary date</small></span></label><div class="sip-fields full-width" id="epf-monthly-fields" hidden><div class="form-field"><label for="f-epf-employee">Employee EPF (12% · ₹/month)</label><input id="f-epf-employee" type="number" min="0" step="any" placeholder="6000"></div><div class="form-field"><label for="f-epf-employer">Employer EPF (3.67% · ₹/month)</label><input id="f-epf-employer" type="number" min="0" step="any" placeholder="1835"></div><div class="form-field full-width"><label for="f-epf-salary-date">Next salary date (after current balance)</label><input id="f-epf-salary-date" type="date"></div><p class="form-hint full-width">Refresh adds both contributions on each salary date from the date above.</p></div>`
 };
 function syncRecurringFields(toggleId, panelId) {
   const toggle = $(`#${toggleId}`), panel = $(`#${panelId}`);
@@ -340,7 +392,7 @@ function syncRecurringFields(toggleId, panelId) {
   panel.hidden = !toggle.checked;
   panel.querySelectorAll('input').forEach(input => { input.disabled = !toggle.checked; });
 }
-function setType(type) { activeType = type; $$('.asset-tab').forEach(tab => tab.classList.toggle('selected', tab.dataset.type === type)); $('#form-fields').innerHTML = fields[type]; const accountField = `<div class="form-field full-width"><label for="f-account-number">Account Number (optional)</label><input id="f-account-number" maxlength="100" autocomplete="off" placeholder="Enter account number"></div>`; const accountLabel = $('#form-fields #f-epf-name') || $('#form-fields #f-name'); accountLabel.closest('.form-field').insertAdjacentHTML('afterend', accountField); syncRecurringFields('f-sip-enabled', 'sip-fields'); syncRecurringFields('f-ppf-monthly-enabled', 'ppf-monthly-fields'); $('#modal-title').textContent = editingId ? `Edit ${ASSETS[type].label.toLowerCase()}` : `Add ${ASSETS[type].label.toLowerCase()}`; $('#save-investment').innerHTML = editingId ? 'Save changes <span>→</span>' : 'Add to portfolio <span>→</span>'; $('#asset-tabs').classList.toggle('editing', Boolean(editingId)); const unitsLabel = $('#form-fields label[for="f-units"]'); if (unitsLabel && editingId) unitsLabel.textContent = 'Total units held'; const ppfLabel = $('#form-fields label[for="f-contribution"]'); if (ppfLabel && editingId) ppfLabel.textContent = 'Current total balance (₹)'; const basisField = $('#basis-field'); if (basisField) basisField.hidden = !editingId; $('#modal-error').textContent = ''; }
+function setType(type) { activeType = type; $$('.asset-tab').forEach(tab => tab.classList.toggle('selected', tab.dataset.type === type)); $('#form-fields').innerHTML = fields[type]; const accountField = `<div class="form-field full-width"><label for="f-account-number">Account Number (optional)</label><input id="f-account-number" maxlength="100" autocomplete="off" placeholder="Enter account number"></div>`; const accountLabel = $('#form-fields #f-epf-name') || $('#form-fields #f-name'); accountLabel.closest('.form-field').insertAdjacentHTML('afterend', accountField); syncRecurringFields('f-sip-enabled', 'sip-fields'); syncRecurringFields('f-ppf-monthly-enabled', 'ppf-monthly-fields'); syncRecurringFields('f-epf-monthly-enabled', 'epf-monthly-fields'); $('#modal-title').textContent = editingId ? `Edit ${ASSETS[type].label.toLowerCase()}` : `Add ${ASSETS[type].label.toLowerCase()}`; $('#save-investment').innerHTML = editingId ? 'Save changes <span>→</span>' : 'Add to portfolio <span>→</span>'; $('#asset-tabs').classList.toggle('editing', Boolean(editingId)); const unitsLabel = $('#form-fields label[for="f-units"]'); if (unitsLabel && editingId) unitsLabel.textContent = 'Total units held'; const ppfLabel = $('#form-fields label[for="f-contribution"]'); if (ppfLabel && editingId) ppfLabel.textContent = 'Current total balance (₹)'; const basisField = $('#basis-field'); if (basisField) basisField.hidden = !editingId; $('#modal-error').textContent = ''; }
 function openModal(item = null) { editingId = item?.id || null; $('#modal-backdrop').hidden = false; setType(item?.type || activeType); if (item) {
   const set = (id, value) => { const input = $(`#f-${id}`); if (input) input.value = value ?? ''; };
   set('name', item.name);
@@ -349,8 +401,8 @@ function openModal(item = null) { editingId = item?.id || null; $('#modal-backdr
   if (item.type === 'ppf') { set('contribution', item.balance); set('date', item.openDate); $('#f-ppf-monthly-enabled').checked = Boolean(item.monthlyEnabled); set('ppf-monthly-amount', item.monthlyAmount); set('ppf-monthly-start-date', item.monthlyStartDate); $('#ppf-monthly-fields').hidden = !item.monthlyEnabled; }
   if (item.type === 'fd') { set('amount', item.amount); set('rate', item.rate); set('tenure', item.tenure); set('date', item.openDate); }
   if (item.type === 'rd') { set('monthly', item.monthly); set('rate', item.rate); set('tenure', item.tenure); set('date', item.openDate); }
-  if (item.type === 'epf') { set('epf-name', item.name); set('epf-balance', item.balance); set('epf-employee', item.employeeContribution); set('epf-employer', item.employerContribution); set('epf-salary-date', item.salaryDate); }
-  syncRecurringFields('f-sip-enabled', 'sip-fields'); syncRecurringFields('f-ppf-monthly-enabled', 'ppf-monthly-fields');
+  if (item.type === 'epf') { set('epf-name', item.name); set('epf-balance', item.balance); set('epf-employee', item.employeeContribution); set('epf-employer', item.employerContribution); set('epf-salary-date', item.salaryDate); $('#f-epf-monthly-enabled').checked = Boolean(item.salaryDate && (number(item.employeeContribution) + number(item.employerContribution) > 0)); }
+  syncRecurringFields('f-sip-enabled', 'sip-fields'); syncRecurringFields('f-ppf-monthly-enabled', 'ppf-monthly-fields'); syncRecurringFields('f-epf-monthly-enabled', 'epf-monthly-fields');
 }
 const first = $('#f-name') || $('#f-code') || $('#f-epf-name'); first?.focus(); }
 function closeModal() { $('#modal-backdrop').hidden = true; $('#investment-form').reset(); editingId = null; $('#asset-tabs').classList.remove('editing'); }
@@ -360,7 +412,7 @@ $('#modal-close').addEventListener('click', closeModal); $('#cancel-add').addEve
 $('#asset-tabs').addEventListener('click', e => { const button = e.target.closest('[data-type]'); if (button) setType(button.dataset.type); });
 async function fetchNav() { const code = $('#f-code').value.trim(); if (!code) { $('#nav-status').textContent = 'Enter an AMFI scheme code first.'; return; } const button = $('#fetch-nav'); button.disabled = true; $('#nav-status').textContent = 'Fetching latest NAV…'; try { const data = await api(`/api/mf/${encodeURIComponent(code)}`); $('#f-name').value = data.name; $('#f-nav').value = data.nav; $('#nav-status').textContent = `NAV ₹${data.nav} · as of ${data.date}`; } catch (error) { $('#nav-status').textContent = error.message; } finally { button.disabled = false; } }
 $('#form-fields').addEventListener('click', e => { if (e.target.id === 'fetch-nav') fetchNav(); });
-$('#form-fields').addEventListener('change', e => { if (e.target.id === 'f-sip-enabled') syncRecurringFields('f-sip-enabled', 'sip-fields'); if (e.target.id === 'f-ppf-monthly-enabled') syncRecurringFields('f-ppf-monthly-enabled', 'ppf-monthly-fields'); });
+$('#form-fields').addEventListener('change', e => { if (e.target.id === 'f-sip-enabled') syncRecurringFields('f-sip-enabled', 'sip-fields'); if (e.target.id === 'f-ppf-monthly-enabled') syncRecurringFields('f-ppf-monthly-enabled', 'ppf-monthly-fields'); if (e.target.id === 'f-epf-monthly-enabled') syncRecurringFields('f-epf-monthly-enabled', 'epf-monthly-fields'); });
 $('#investment-form').addEventListener('submit', async e => {
   e.preventDefault(); const get = id => $(`#f-${id}`)?.value; let item, beforeSave = null;
   try {
@@ -381,7 +433,7 @@ $('#investment-form').addEventListener('submit', async e => {
       const name = get('name').trim(), units = number(get('units')), sipEnabled = $('#f-sip-enabled').checked;
       const sipAmount = sipEnabled ? number(get('sip-amount')) : 0, sipStartDate = sipEnabled ? get('sip-start-date') || '' : '';
       if (!units) throw new Error('Enter the number of units.');
-      if (sipEnabled && (!sipAmount || !sipStartDate)) throw new Error('Enter a monthly SIP amount and first SIP date.');
+      if (sipEnabled && (!sipAmount || !sipStartDate)) throw new Error('Enter a monthly SIP amount and next SIP date.');
       const previous = editingId ? holdings.find(holding => holding.id === editingId) : null;
       const sipConfig = { sipEnabled, sipAmount: sipAmount || 0, sipStartDate, sipPurchases: previous?.sipPurchases || [] };
       if (editingId) item = { type: 'mf', name, units, price: nav, nav, schemeCode, invested: number(get('existing-cost')) || units * nav, ...sipConfig, updatedAt: new Date().toISOString() };
@@ -410,10 +462,11 @@ $('#investment-form').addEventListener('submit', async e => {
     if (activeType === 'fd') item = { type: 'fd', name: get('name').trim(), amount: number(get('amount')), rate: number(get('rate')), tenure: number(get('tenure')), openDate: get('date') };
     if (activeType === 'rd') item = { type: 'rd', name: get('name').trim(), monthly: number(get('monthly')), rate: number(get('rate')), tenure: number(get('tenure')), openDate: get('date') };
     if (activeType === 'epf') {
-      const name = get('epf-name').trim(), balance = number(get('epf-balance')), employeeContribution = number(get('epf-employee')), employerContribution = number(get('epf-employer')), salaryDate = get('epf-salary-date');
+      const name = get('epf-name').trim(), balance = number(get('epf-balance')), monthlyEnabled = $('#f-epf-monthly-enabled').checked;
+      const employeeContribution = monthlyEnabled ? number(get('epf-employee')) : 0, employerContribution = monthlyEnabled ? number(get('epf-employer')) : 0, salaryDate = monthlyEnabled ? get('epf-salary-date') : '';
       if (!name) throw new Error('Enter an account label.');
-      if (employeeContribution + employerContribution <= 0) throw new Error('Enter a monthly employee or employer EPF contribution.');
-      if (!salaryDate) throw new Error('Enter the next salary date.');
+      if (monthlyEnabled && employeeContribution + employerContribution <= 0) throw new Error('Enter a monthly employee or employer EPF contribution.');
+      if (monthlyEnabled && !salaryDate) throw new Error('Enter the next salary date.');
       const existing = editingId ? null : holdings.find(holding => holding.type === 'epf' && holding.name.trim().toLowerCase() === name.toLowerCase());
       if (existing) mergeTarget = existing.id;
       item = { type: 'epf', name, balance, employeeContribution, employerContribution, salaryDate };
@@ -431,7 +484,12 @@ $('#investment-form').addEventListener('submit', async e => {
 });
 $('#holdings-body').addEventListener('click', async e => { const editButton = e.target.closest('[data-edit]'); if (editButton) { const item = holdings.find(holding => holding.id === editButton.dataset.edit); if (item) openModal(item); return; } const button = e.target.closest('[data-delete]'); if (!button) return; const target = holdings.find(item => item.id === button.dataset.delete); if (!target || !window.confirm(`Delete investment "${target.name}"?`)) return; const before = holdings; holdings = holdings.filter(item => item.id !== button.dataset.delete); try { const data = await api('/api/holdings', { method: 'PUT', body: JSON.stringify({ holdings }) }); holdings = data.holdings; render(); showToast('Investment removed.'); } catch (error) { holdings = before; showToast(error.message); } });
 $('#filter-button').addEventListener('click', () => { const types = ['all', ...Object.keys(ASSETS)], next = types[(types.indexOf(filterType) + 1) % types.length]; filterType = next; $('#filter-button').innerHTML = `${next === 'all' ? 'All assets' : ASSETS[next].label} <span>⌄</span>`; render(); });
-(async function init() { try { const data = await api('/api/me'); openApp(data.user); } catch { openAuth(); setAuth('login'); } })();
+(async function init() {
+  passwordResetToken = new URLSearchParams(location.search).get('reset') || '';
+  if (passwordResetToken) { openAuth(); setAuth('reset'); return; }
+  try { const data = await api('/api/me'); openApp(data.user); }
+  catch { openAuth(); setAuth('login'); }
+})();
 
 function showView(view, scrollTarget = '') {
   const isInsurance = view === 'insurance', isInvestments = view === 'investments', isDebt = view === 'debt';

@@ -2,10 +2,14 @@
 create table if not exists public.users (
   id uuid primary key,
   username text not null unique,
+  email text,
   salt text not null,
   hash text not null,
   created_at timestamptz not null default now()
 );
+
+alter table public.users add column if not exists email text;
+update public.users set email = 'sushycom@gmail.com' where email is null or btrim(email) = '';
 
 create table if not exists public.user_data (
   user_id uuid primary key references public.users(id) on delete cascade,

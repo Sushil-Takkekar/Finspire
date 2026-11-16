@@ -14,7 +14,7 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The local account and portf
 
 ## Deploy with Render and Supabase
 
-1. Create a Supabase project and run [`supabase/schema.sql`](supabase/schema.sql) and [`supabase/storage.sql`](supabase/storage.sql) in its SQL Editor. The storage script creates a private bucket for insurance PDFs.
+1. Create a Supabase project and run [`supabase/schema.sql`](supabase/schema.sql) and [`supabase/storage.sql`](supabase/storage.sql) in its SQL Editor. The schema includes the recovery email column and assigns `sushycom@gmail.com` to existing accounts without an email. To migrate an already-running project, run [`supabase/email-password-reset.sql`](supabase/email-password-reset.sql) before deploying the new server code. The storage script creates a private bucket for insurance PDFs.
 2. Import the current local accounts and records before switching to the hosted database. In a local terminal, set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, then run:
 
    ```sh
@@ -22,7 +22,7 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The local account and portf
    ```
 
    The import keeps existing account IDs and password hashes. The service role key is a secret: use it only in your terminal and Render environment settings; never put it in browser code or commit it.
-3. Push the app to GitHub, then create a Render Blueprint from the repository. Render reads [`render.yaml`](render.yaml); enter `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` when prompted.
+3. Push the app to GitHub, then create a Render Blueprint from the repository. Render reads [`render.yaml`](render.yaml); enter `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RESEND_API_KEY`, and `EMAIL_FROM` when prompted. `EMAIL_FROM` must be a sender/domain configured with Resend. `PUBLIC_APP_URL` should be the public Finspire URL used in reset links.
 
 Insurance policy PDFs are stored in the private Supabase Storage bucket `insurance-policies`. The server validates PDF files and limits them to 10 MB. Policy document links are issued as short-lived signed URLs after the signed-in owner requests them. Re-running `supabase/storage.sql` safely updates the bucket's privacy, size, and file-type settings.
 4. Open the Render URL and sign in with an imported account, or create a new account.
@@ -30,6 +30,10 @@ Insurance policy PDFs are stored in the private Supabase Storage bucket `insuran
 Render hosts the Node server. The server uses the Supabase service role key to access the private tables; browser requests never receive that key. Set both Supabase environment variables in production. Locally, if they are unset, Finspire continues using `data/db.json`.
 
 Sessions are held in server memory, so signing in again may be required after a server restart or deploy. The app uses secure cookies when `NODE_ENV=production`.
+
+## Password recovery
+
+New accounts require an email address. Sign in with either your username or email and password. Password recovery asks for the account email and sends a reset link when it matches. Existing accounts without an email receive `sushycom@gmail.com` as their recovery email. Reset links expire after 15 minutes and can be used once. Production email is sent through Resend using the server-only `RESEND_API_KEY` and `EMAIL_FROM` environment variables. Without those settings, local development prints the reset link in the server console instead of sending email.
 
 ## Supported calculations
 
